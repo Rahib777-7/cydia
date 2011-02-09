@@ -5727,6 +5727,7 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     _H<NSString> count_;
     _H<UIImage> icon_;
     _H<UISwitch> switch_;
+    float indent_;
     BOOL editing_;
 }
 
@@ -5782,9 +5783,22 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     if (section == nil) {
         name_ = UCLocalize("ALL_PACKAGES");
         count_ = nil;
+        indent_ = 8;
     } else {
         basic_ = [section name];
-        section_ = [section localized];
+        if (basic_ != nil)
+            basic_ = [basic_ retain];
+
+        static Pcre title_r("^(.*?) \\((.*)\\)$");
+        if (title_r(basic_)) {
+            section_ = [LocalizeSection(title_r[2]) retain];
+            indent_ = 28;
+        } else {
+            section_ = [section localized];
+            if (section_ != nil)
+                section_ = [section_ retain];
+            indent_ = 8;
+        }
 
         name_  = section_ == nil || [section_ length] == 0 ? UCLocalize("NO_SECTION") : (NSString *) section_;
         count_ = [NSString stringWithFormat:@"%d", [section count]];
@@ -5813,13 +5827,13 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 - (void) drawContentRect:(CGRect)rect {
     bool highlighted(highlighted_ && !editing_);
 
-    float width(rect.size.width);
-    float left(8);
+    float left(indent_);
+    float width(rect.size.width - left);
     if (editing_)
-        width -= 117;
+        width -= 109;
     else {
-        width -= 70;
-	    [icon_ drawInRect:CGRectMake(8, 7, 32, 32)];
+        width -= 62;
+	    [icon_ drawInRect:CGRectMake(indent_, 7, 32, 32)];
 	    left += 40;
     }
 
@@ -5830,7 +5844,7 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 
     UISetColor(White_);
     if (count_ != nil && !editing_)
-        [count_ drawAtPoint:CGPointMake(13 + (29 - size.width) / 2, 16) withFont:Font12Bold_];
+        [count_ drawAtPoint:CGPointMake(indent_ + 5 + (29 - size.width) / 2, 16) withFont:Font12Bold_];
 }
 
 @end
