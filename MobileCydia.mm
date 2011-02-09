@@ -5813,23 +5813,23 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 - (void) drawContentRect:(CGRect)rect {
     bool highlighted(highlighted_ && !editing_);
 
-    [icon_ drawInRect:CGRectMake(8, 7, 32, 32)];
-
-    if (highlighted)
-        UISetColor(White_);
-
     float width(rect.size.width);
+    float left(8);
     if (editing_)
-        width -= 87;
+        width -= 117;
+    else {
+        width -= 70;
+	    [icon_ drawInRect:CGRectMake(8, 7, 32, 32)];
+	    left += 40;
+    }
 
-    if (!highlighted)
-        UISetColor(Black_);
-    [name_ drawAtPoint:CGPointMake(48, 9) forWidth:(width - 70) withFont:Font22Bold_ lineBreakMode:UILineBreakModeTailTruncation];
+    UISetColor(highlighted ? White_ : Black_);
+    [name_ drawAtPoint:CGPointMake(left, 9) forWidth:width withFont:Font22Bold_ lineBreakMode:UILineBreakModeTailTruncation];
 
     CGSize size = [count_ sizeWithFont:Font14_];
 
     UISetColor(White_);
-    if (count_ != nil)
+    if (count_ != nil && !editing_)
         [count_ drawAtPoint:CGPointMake(13 + (29 - size.width) / 2, 16) withFont:Font12Bold_];
 }
 
