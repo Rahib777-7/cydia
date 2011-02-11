@@ -233,6 +233,10 @@ typedef enum {
 
 @interface UISearchBar (Apple)
 - (UITextField *) searchField;
+- (BOOL) usesEmbeddedAppearance;
+- (void) setUsesEmbeddedAppearance:(BOOL)enabled;
+- (UIEdgeInsets) contentInset;
+- (void) setContentInset:(UIEdgeInsets)insets;
 @end
 
 @interface UITabBarController (Apple)

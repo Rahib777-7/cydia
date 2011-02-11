@@ -5579,7 +5579,8 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 /* Package List Controller {{{ */
 @interface PackageListController : CYViewController <
     UITableViewDataSource,
-    UITableViewDelegate
+    UITableViewDelegate,
+    UISearchBarDelegate
 > {
     _transient Database *database_;
     unsigned era_;
@@ -5589,9 +5590,13 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     NSMutableArray *index_;
     NSMutableDictionary *indices_;
     NSString *title_;
+
+    UISearchBar *search_;
+    BOOL filtered_;
 }
 
 - (id) initWithDatabase:(Database *)database title:(NSString *)title;
+- (void) setSearchTerm:(NSString *)term;
 - (void) setDelegate:(id)delegate;
 - (void) resetCursor;
 
@@ -5606,12 +5611,32 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     [index_ release];
     [indices_ release];
     [title_ release];
+    [search_ release];
 
     [super dealloc];
 }
 
 - (void) deselectWithAnimation:(BOOL)animated {
     [list_ deselectRowAtIndexPath:[list_ indexPathForSelectedRow] animated:animated];
+}
+
+- (void) resetCursor {
+    [list_ setContentOffset:CGPointMake(0, 0) animated:NO];
+}
+
+- (void) setSearchTerm:(NSString *)searchTerm {
+    [search_ setText:searchTerm];
+}
+
+- (void) searchBarSearchButtonClicked:(UISearchBar *)searchBar {
+    filtered_ = NO;
+    [search_ resignFirstResponder];
+    [self reloadData];
+}
+
+- (void) searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)text {
+    filtered_ = YES;
+    [self reloadData];
 }
 
 - (void) resizeForKeyboardBounds:(CGRect)bounds duration:(NSTimeInterval)duration curve:(UIViewAnimationCurve)curve {
@@ -5686,6 +5711,8 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 }
 
 - (void) didSelectPackage:(Package *)package {
+    [search_ resignFirstResponder];
+
     CYPackageController *view([[[CYPackageController alloc] initWithDatabase:database_] autorelease]);
     [view setPackage:package];
     [view setDelegate:delegate_];
@@ -5741,8 +5768,19 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 }
 
 - (NSArray *) sectionIndexTitlesForTableView:(UITableView *)tableView {
-    // XXX: is 20 the most optimal number here?
-    return [packages_ count] > 20 ? index_ : nil;
+    UIEdgeInsets insets = {0.0f, 0.0f, 0.0f, 0.0f};
+    NSArray *titles = nil;
+
+    // XXX: is this the most optimal number here?
+    if ([index_ count] >= 7) {
+        insets.right = 30.0f;
+        titles = [[NSArray arrayWithObject:@"{search}"] arrayByAddingObjectsFromArray:index_];
+    }
+
+    if ([search_ respondsToSelector:@selector(setContentInset:)]) // 3.0+
+        [search_ setContentInset:insets];
+
+    return titles;
 }
 
 - (NSInteger) tableView:(UITableView *)tableView sectionForSectionIndexTitle:(NSString *)title atIndex:(NSInteger)index {
@@ -5752,7 +5790,16 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     }
 #endif
 
-    return index;
+    if ([title isEqualToString:@"{search}"]) {
+        [list_ scrollRectToVisible:[search_ frame] animated:NO];
+        return -1;
+    }
+
+    return index - 1;
+}
+
+- (BOOL) allowsSearch {
+    return YES;
 }
 
 - (id) initWithDatabase:(Database *)database title:(NSString *)title {
@@ -5776,10 +5823,42 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
         list_ = [[UITableView alloc] initWithFrame:[[self view] bounds] style:UITableViewStylePlain];
         [list_ setAutoresizingMask:UIViewAutoresizingFlexibleBoth];
         [list_ setRowHeight:73];
-        [[self view] addSubview:list_];
-
         [list_ setDataSource:self];
         [list_ setDelegate:self];
+        [[self view] addSubview:list_];
+
+        if ([self allowsSearch]) {
+            search_ = [[UISearchBar alloc] init];
+            [search_ sizeToFit];
+            [search_ setDelegate:self];
+            [search_ setPlaceholder:UCLocalize("SEARCH_EX")];
+            if ([search_ respondsToSelector:@selector(setUsesEmbeddedAppearance:)]) // 3.0+
+                [search_ setUsesEmbeddedAppearance:YES];
+
+            UITextField *textField;
+            if ([search_ respondsToSelector:@selector(searchField)])
+                textField = [search_ searchField];
+            else
+                textField = MSHookIvar<UITextField *>(search_, "_searchField");
+            [textField setEnablesReturnKeyAutomatically:NO];
+
+            [list_ setTableHeaderView:search_];
+
+            CGRect topframe = CGRectMake(
+                0.0f,
+                -[list_ bounds].size.height,
+                [list_ bounds].size.width,
+                [list_ bounds].size.height
+            );
+            UIView *top = [[[UIView alloc] initWithFrame:topframe] autorelease];
+            [top setAutoresizingMask:UIViewAutoresizingFlexibleBoth];
+            [top setBackgroundColor:[UIColor
+                colorWithRed:(226.0f / 255.0f)
+                green:(231.0f / 255.0f)
+                blue:238.0f / 255.0f
+            alpha:1.0f]];
+            [list_ addSubview:top];
+        }
     } return self;
 }
 
@@ -5791,6 +5870,10 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     return true;
 }
 
+- (BOOL) hasSearchText {
+    return [search_ text] != nil && ![[search_ text] isEqualToString:@""];
+}
+
 - (void) reloadData {
     era_ = [database_ era];
     NSArray *packages = [database_ packages];
@@ -5798,11 +5881,28 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     [packages_ removeAllObjects];
     [sections_ removeAllObjects];
 
-    _profile(PackageTable$reloadData$Filter)
-        for (Package *package in packages)
-            if ([self hasPackage:package])
-                [packages_ addObject:package];
-    _end
+    if (![self hasSearchText]) {
+        _profile(PackageTable$reloadData$Filter)
+            for (Package *package in packages)
+                if ([self hasPackage:package])
+                    [packages_ addObject:package];
+        _end
+    } else {
+        NSString *term = [search_ text];
+
+        /* XXX: this is an unsafe optimization of doomy hell */
+        SEL selector = filtered_ ? @selector(isUnfilteredAndSelectedForBy:) : @selector(isUnfilteredAndSearchedForBy:);
+        Method method(class_getInstanceMethod([Package class], selector));
+        _assert(method != NULL);
+        IMP imp = method_getImplementation(method);
+        _assert(imp != NULL);
+
+        _profile(PackageTable$reloadData$Filter)
+            for (Package *package in packages)
+                if ((*reinterpret_cast<bool (*)(id, SEL, id)>(imp))(package, selector, term) && [self hasPackage:package])
+                    [packages_ addObject:package];
+        _end
+    }
 
     [indices_ removeAllObjects];
 
@@ -5875,10 +5975,9 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     _profile(PackageTable$reloadData$List)
         [list_ reloadData];
     _end
-}
 
-- (void) resetCursor {
-    [list_ scrollRectToVisible:CGRectMake(0, 0, 0, 0) animated:NO];
+    if ([self hasSearchText])
+        [self resetCursor];
 }
 
 @end
@@ -7062,78 +7161,29 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 @end
 /* }}} */
 /* Search Controller {{{ */
-@interface SearchController : FilteredPackageListController <
-    UISearchBarDelegate
-> {
-    UISearchBar *search_;
+@interface SearchController : PackageListController {
 }
-
-- (id) initWithDatabase:(Database *)database;
-- (void) setSearchTerm:(NSString *)term;
-- (void) reloadData;
 
 @end
 
 @implementation SearchController
 
-- (void) dealloc {
-    [search_ release];
-    [super dealloc];
-}
-
-- (void) setSearchTerm:(NSString *)searchTerm {
-    [search_ setText:searchTerm];
-}
-
-- (void) searchBarSearchButtonClicked:(UISearchBar *)searchBar {
-    [self setObject:[search_ text] forFilter:@selector(isUnfilteredAndSearchedForBy:)];
-    [search_ resignFirstResponder];
-    [self reloadData];
-}
-
-- (void) searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)text {
-    [self setObject:text forFilter:@selector(isUnfilteredAndSelectedForBy:)];
-    [self reloadData];
-}
-
 - (id) initWithDatabase:(Database *)database {
-    return [super initWithDatabase:database title:UCLocalize("SEARCH") filter:@selector(isUnfilteredAndSearchedForBy:) with:nil];
-}
-
-- (void)viewDidAppear:(BOOL)animated {
-    [super viewDidAppear:animated];
-    if (!search_) {
-        search_ = [[UISearchBar alloc] initWithFrame:CGRectMake(0, 0, [[self view] bounds].size.width, 44.0f)];
-        [search_ layoutSubviews];
-        [search_ setPlaceholder:UCLocalize("SEARCH_EX")];
-
+    if ((self = [super initWithDatabase:database title:UCLocalize("SEARCH")])) {
         UITextField *textField;
         if ([search_ respondsToSelector:@selector(searchField)])
             textField = [search_ searchField];
         else
             textField = MSHookIvar<UITextField *>(search_, "_searchField");
-
         [textField setAutoresizingMask:UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin];
-        [search_ setDelegate:self];
-        [textField setEnablesReturnKeyAutomatically:NO];
         [[self navigationItem] setTitleView:textField];
-    }
+
+        [list_ setTableHeaderView:nil];
+    } return self;
 }
 
-- (void) _reloadData {
-}
-
-- (void) reloadData {
-    _profile(SearchController$reloadData)
-        [super reloadData];
-    _end
-    PrintTimes();
-    [self resetCursor];
-}
-
-- (void) didSelectPackage:(Package *)package {
-    [search_ resignFirstResponder];
-    [super didSelectPackage:package];
+- (bool) hasPackage:(Package *)package {
+    return [self hasSearchText];
 }
 
 @end
