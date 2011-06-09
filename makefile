@@ -2,7 +2,9 @@ sdks := /Developer/Platforms/iPhoneOS.platform/Developer/SDKs
 ioss := $(sort $(patsubst $(sdks)/iPhoneOS%.sdk,%,$(wildcard $(sdks)/iPhoneOS*.sdk)))
 
 ios := $(word $(words $(ioss)),$(ioss))
+
 gcc := 4.2
+gcc :=
 
 flags := 
 link := 
@@ -21,17 +23,23 @@ endif
 sdk := $(sdks)/iPhoneOS$(ios).sdk
 
 flags += -F$(sdk)/System/Library/PrivateFrameworks
-flags += -I. -isystem sysroot/usr/include -Lsysroot/usr/lib
-flags += -Wall -Werror -Wno-deprecated-declarations
+flags += -I. -isystem sysroot/usr/include
+flags += -Wall -Wno-deprecated-declarations
+flags += -Wno-logical-op-parentheses
 flags += -fmessage-length=0
 flags += -g0 -O2
 flags += -fobjc-exceptions
-flags += -fno-guess-branch-probability
 flags += -fvisibility=hidden
+
+ifneq ($(gcc),)
+flags += -fno-guess-branch-probability
+endif
 
 xflags :=
 xflags += -fobjc-call-cxx-cdtors
 xflags += -fvisibility-inlines-hidden
+
+link += -Lsysroot/usr/lib
 
 link += -framework CoreFoundation
 link += -framework CoreGraphics
@@ -59,9 +67,14 @@ backrow += -FAppleTV -framework BackRow -framework AppleTV
 
 version := $(shell ./version.sh)
 
-#cycc = cycc -r4.2 -i$(ios) -o$@
+ifeq ($(gcc),)
+gxx := /Developer/Platforms/iPhoneOS.platform/Developer/usr/bin/clang++
+else
 gxx := /Developer/Platforms/iPhoneOS.platform/Developer/usr/bin/g++-$(gcc)
+endif
+
 cycc = $(gxx) -mthumb -arch armv6 -o $@ -mcpu=arm1176jzf-s -miphoneos-version-min=2.0 -isysroot $(sdk) -idirafter /usr/include -F{sysroot,}/Library/Frameworks
+#cycc = cycc -r4.2 -i$(ios) -o$@
 
 dirs := Menes CyteKit Cydia SDURLCache
 

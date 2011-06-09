@@ -1502,7 +1502,7 @@ static void PackageImport(const void *key, const void *value, void *context) {
 }
 
 - (NSString *) getField:(NSString *)name {
-@synchronized (database_) {
+@synchronized ((id) database_) {
     if ([database_ era] != era_ || index_ == NULL)
         return nil;
 
@@ -2178,7 +2178,7 @@ struct PackageNameOrdering :
 }
 
 - (NSArray *) relations {
-@synchronized (database_) {
+@synchronized ((id) database_) {
     NSMutableArray *relations([NSMutableArray arrayWithCapacity:16]);
     for (pkgCache::DepIterator dep(version_.DependsList()); !dep.end(); ++dep)
         [relations addObject:[[[CydiaRelation alloc] initWithIterator:dep] autorelease]];
@@ -2187,12 +2187,12 @@ struct PackageNameOrdering :
 
 - (NSString *) architecture {
     [self parse];
-@synchronized (database_) {
+@synchronized ((id) database_) {
     return parsed_->architecture_.empty() ? [NSNull null] : (id) parsed_->architecture_;
 } }
 
 - (NSString *) getField:(NSString *)name {
-@synchronized (database_) {
+@synchronized ((id) database_) {
     if ([database_ era] != era_ || file_.end())
         return nil;
 
@@ -2208,7 +2208,7 @@ struct PackageNameOrdering :
 - (void) parse {
     if (parsed_ != NULL)
         return;
-@synchronized (database_) {
+@synchronized ((id) database_) {
     if ([database_ era] != era_ || file_.end())
         return;
 
@@ -2464,7 +2464,7 @@ struct PackageNameOrdering :
 }
 
 - (MIMEAddress *) maintainer {
-@synchronized (database_) {
+@synchronized ((id) database_) {
     if ([database_ era] != era_ || file_.end())
         return nil;
 
@@ -2478,7 +2478,7 @@ struct PackageNameOrdering :
 }
 
 - (size_t) size {
-@synchronized (database_) {
+@synchronized ((id) database_) {
     if ([database_ era] != era_ || version_.end())
         return 0;
 
@@ -2486,7 +2486,7 @@ struct PackageNameOrdering :
 } }
 
 - (NSString *) longDescription {
-@synchronized (database_) {
+@synchronized ((id) database_) {
     if ([database_ era] != era_ || file_.end())
         return nil;
 
@@ -2511,7 +2511,7 @@ struct PackageNameOrdering :
     if (parsed_ != NULL)
         return static_cast<NSString *>(parsed_->tagline_);
 
-@synchronized (database_) {
+@synchronized ((id) database_) {
     pkgRecords::Parser &parser([database_ records]->Lookup(file_));
 
     const char *start, *end;
@@ -2649,7 +2649,7 @@ struct PackageNameOrdering :
 }
 
 - (BOOL) hasMode {
-@synchronized (database_) {
+@synchronized ((id) database_) {
     if ([database_ era] != era_ || iterator_.end())
         return nil;
 
@@ -2658,7 +2658,7 @@ struct PackageNameOrdering :
 } }
 
 - (NSString *) mode {
-@synchronized (database_) {
+@synchronized ((id) database_) {
     if ([database_ era] != era_ || iterator_.end())
         return nil;
 
@@ -2758,7 +2758,7 @@ struct PackageNameOrdering :
 }
 
 - (NSString *) state {
-@synchronized (database_) {
+@synchronized ((id) database_) {
     if ([database_ era] != era_ || file_.end())
         return nil;
 
@@ -2785,7 +2785,7 @@ struct PackageNameOrdering :
 } }
 
 - (NSString *) selection {
-@synchronized (database_) {
+@synchronized ((id) database_) {
     if ([database_ era] != era_ || file_.end())
         return nil;
 
@@ -2891,7 +2891,7 @@ struct PackageNameOrdering :
 
 - (Source *) source {
     if (source_ == nil) {
-        @synchronized (database_) {
+        @synchronized ((id) database_) {
             if ([database_ era] != era_ || file_.end())
                 source_ = (Source *) [NSNull null];
             else
@@ -3014,7 +3014,7 @@ struct PackageNameOrdering :
 }
 
 - (void) clear {
-@synchronized (database_) {
+@synchronized ((id) database_) {
     pkgProblemResolver *resolver = [database_ resolver];
     resolver->Clear(iterator_);
 
@@ -3024,7 +3024,7 @@ struct PackageNameOrdering :
 } }
 
 - (void) install {
-@synchronized (database_) {
+@synchronized ((id) database_) {
     pkgProblemResolver *resolver = [database_ resolver];
     resolver->Clear(iterator_);
     resolver->Protect(iterator_);
@@ -3039,7 +3039,7 @@ struct PackageNameOrdering :
 } }
 
 - (void) remove {
-@synchronized (database_) {
+@synchronized ((id) database_) {
     pkgProblemResolver *resolver = [database_ resolver];
     resolver->Clear(iterator_);
     resolver->Remove(iterator_);
@@ -3364,7 +3364,7 @@ class CydiaLogCleaner :
 - (Package *) packageWithName:(NSString *)name {
     if (name == nil)
         return nil;
-@synchronized (self) {
+@synchronized ((id) self) {
     if (static_cast<pkgDepCache *>(cache_) == NULL)
         return nil;
     pkgCache::PkgIterator iterator(cache_->FindPkg([name UTF8String]));
@@ -3504,7 +3504,7 @@ class CydiaLogCleaner :
 }
 
 - (void) reloadDataWithInvocation:(NSInvocation *)invocation {
-@synchronized (self) {
+@synchronized ((id) self) {
     ++era_;
 
     [self releasePackages];
@@ -3684,7 +3684,7 @@ class CydiaLogCleaner :
 } }
 
 - (void) clear {
-@synchronized (self) {
+@synchronized ((id) self) {
     delete resolver_;
     resolver_ = new pkgProblemResolver(cache_);
 
@@ -3703,7 +3703,7 @@ class CydiaLogCleaner :
 }
 
 - (bool) clean {
-@synchronized (self) {
+@synchronized ((id) self) {
     // XXX: I don't remember this condition
     if (lock_ != NULL)
         return false;
@@ -3970,7 +3970,7 @@ static _H<NSMutableSet> Diversions_;
 @end
 
 @interface CydiaObject : NSObject {
-    _H<IndirectDelegate> indirect_;
+    _H<CyteWebViewController> indirect_;
     _transient id delegate_;
 }
 
@@ -3996,7 +3996,7 @@ static _H<NSMutableSet> Diversions_;
 
 - (id) initWithDelegate:(IndirectDelegate *)indirect {
     if ((self = [super init]) != nil) {
-        indirect_ = indirect;
+        indirect_ = (CyteWebViewController *) indirect;
     } return self;
 }
 
@@ -4278,7 +4278,7 @@ static _H<NSMutableSet> Diversions_;
 }
 
 - (NSArray *) getMetadataKeys {
-@synchronized (Values_) {
+@synchronized ((id) Values_) {
     return [Values_ allKeys];
 } }
 
@@ -4292,12 +4292,12 @@ static _H<NSMutableSet> Diversions_;
 }
 
 - (id) getMetadataValue:(NSString *)key {
-@synchronized (Values_) {
+@synchronized ((id) Values_) {
     return [Values_ objectForKey:key];
 } }
 
 - (void) setMetadataValue:(NSString *)key :(NSString *)value {
-@synchronized (Values_) {
+@synchronized ((id) Values_) {
     if (value == nil || value == (id) [WebUndefined undefined] || value == (id) [NSNull null])
         [Values_ removeObjectForKey:key];
     else
@@ -4307,12 +4307,12 @@ static _H<NSMutableSet> Diversions_;
 } }
 
 - (id) getSessionValue:(NSString *)key {
-@synchronized (SessionData_) {
+@synchronized ((id) SessionData_) {
     return [SessionData_ objectForKey:key];
 } }
 
 - (void) setSessionValue:(NSString *)key :(NSString *)value {
-@synchronized (SessionData_) {
+@synchronized ((id) SessionData_) {
     if (value == (id) [WebUndefined undefined])
         [SessionData_ removeObjectForKey:key];
     else
@@ -4320,22 +4320,22 @@ static _H<NSMutableSet> Diversions_;
 } }
 
 - (void) addBridgedHost:(NSString *)host {
-@synchronized (HostConfig_) {
+@synchronized ((id) HostConfig_) {
     [BridgedHosts_ addObject:host];
 } }
 
 - (void) addInsecureHost:(NSString *)host {
-@synchronized (HostConfig_) {
+@synchronized ((id) HostConfig_) {
     [InsecureHosts_ addObject:host];
 } }
 
 - (void) addTokenHost:(NSString *)host {
-@synchronized (HostConfig_) {
+@synchronized ((id) HostConfig_) {
     [TokenHosts_ addObject:host];
 } }
 
 - (void) addPipelinedHost:(NSString *)host scheme:(NSString *)scheme {
-@synchronized (HostConfig_) {
+@synchronized ((id) HostConfig_) {
     if (scheme != (id) [WebUndefined undefined])
         host = [NSString stringWithFormat:@"%@:%@", [scheme lowercaseString], host];
 
@@ -4380,7 +4380,7 @@ static _H<NSMutableSet> Diversions_;
 
 - (NSArray *) getInstalledPackages {
     Database *database([Database sharedInstance]);
-@synchronized (database) {
+@synchronized ((id) database) {
     NSArray *packages([database packages]);
     NSMutableArray *installed([NSMutableArray arrayWithCapacity:1024]);
     for (Package *package in packages)
@@ -4578,7 +4578,7 @@ static _H<NSMutableSet> Diversions_;
     if ([[[self scheme] lowercaseString] isEqualToString:@"https"])
         return true;
 
-    @synchronized (HostConfig_) {
+    @synchronized ((id) HostConfig_) {
         if ([InsecureHosts_ containsObject:[self host]])
             return true;
     }
@@ -4618,7 +4618,7 @@ static _H<NSMutableSet> Diversions_;
 
     bool bridged(false);
 
-    @synchronized (HostConfig_) {
+    @synchronized ((id) HostConfig_) {
         if ([scheme isEqualToString:@"file"])
             bridged = true;
         else if ([scheme isEqualToString:@"https"])
@@ -4673,7 +4673,7 @@ static _H<NSMutableSet> Diversions_;
     bool bridged;
     bool token;
 
-    @synchronized (HostConfig_) {
+    @synchronized ((id) HostConfig_) {
         bridged = [BridgedHosts_ containsObject:host];
         token = [TokenHosts_ containsObject:host];
     }
@@ -6275,7 +6275,7 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 }
 
 - (Package *) packageAtIndexPath:(NSIndexPath *)path {
-@synchronized (database_) {
+@synchronized ((id) database_) {
     if ([database_ era] != era_)
         return nil;
 
@@ -6372,7 +6372,7 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 }
 
 - (NSMutableArray *) _reloadPackages {
-@synchronized (database_) {
+@synchronized ((id) database_) {
     era_ = [database_ era];
     NSArray *packages([database_ packages]);
 
@@ -6409,7 +6409,7 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
         packages = [self _reloadPackages];
     }
 
-@synchronized (database_) {
+@synchronized ((id) database_) {
     if (era_ != [database_ era])
         goto reload;
     reloading_ = 0;
@@ -6549,7 +6549,7 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 }
 
 - (void) setFilter:(SEL)filter {
-@synchronized (self) {
+@synchronized ((id) self) {
     filter_ = filter;
 
     /* XXX: this is an unsafe optimization of doomy hell */
@@ -6560,18 +6560,18 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 } }
 
 - (void) setObject:(id)object {
-@synchronized (self) {
+@synchronized ((id) self) {
     object_ = object;
 } }
 
 - (void) setObject:(id)object forFilter:(SEL)filter {
-@synchronized (self) {
+@synchronized ((id) self) {
     [self setFilter:filter];
     [self setObject:object];
 } }
 
 - (NSMutableArray *) _reloadPackages {
-@synchronized (database_) {
+@synchronized ((id) database_) {
     era_ = [database_ era];
     NSArray *packages([database_ packages]);
 
@@ -6581,7 +6581,7 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     SEL filter;
     _H<NSObject> object;
 
-    @synchronized (self) {
+    @synchronized ((id) self) {
         imp = imp_;
         filter = filter_;
         object = object_;
@@ -6895,6 +6895,9 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 }
 
 - (void) setUnselectedViewController:(UIViewController *)transient {
+    // UITabBarController on 2.x works differently (and it's not worth supporting fully),
+    // so just add it to the first tab's navigation stack instead, which probably works.
+    // XXX: this assumes that the first tab bar controller is a UINavigationController
     if (kCFCoreFoundationVersionNumber < kCFCoreFoundationVersionNumber_iPhoneOS_3_0) {
         if (transient != nil) {
             [[[self viewControllers] objectAtIndex:0] pushViewController:transient animated:YES];
@@ -7659,6 +7662,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 
 /* Changes Controller {{{ */
 @interface ChangesController : CyteViewController <
+    CyteWebViewDelegate,
     UITableViewDataSource,
     UITableViewDelegate
 > {
@@ -7706,7 +7710,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 }
 
 - (Package *) packageAtIndexPath:(NSIndexPath *)path {
-@synchronized (database_) {
+@synchronized ((id) database_) {
     if ([database_ era] != era_)
         return nil;
 
@@ -7881,7 +7885,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 }
 
 - (NSMutableArray *) _reloadPackages {
-@synchronized (database_) {
+@synchronized ((id) database_) {
     era_ = [database_ era];
     NSArray *packages([database_ packages]);
 
@@ -7916,7 +7920,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
         packages = [self _reloadPackages];
     }
 
-@synchronized (database_) {
+@synchronized ((id) database_) {
     if (era_ != [database_ era])
         goto reload;
 
@@ -8618,7 +8622,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 }
 
 - (Source *) sourceAtIndexPath:(NSIndexPath *)indexPath {
-@synchronized (database_) {
+@synchronized ((id) database_) {
     if ([database_ era] != era_)
         return nil;
 
@@ -8909,7 +8913,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 - (void) reloadData {
     [super reloadData];
 
-@synchronized (database_) {
+@synchronized ((id) database_) {
     era_ = [database_ era];
 
     sources_ = [NSMutableArray arrayWithCapacity:16];
@@ -9293,7 +9297,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
                 NSLog(@"###: %@", [url absoluteString]);
 #endif
 
-                @synchronized (HostConfig_) {
+                @synchronized ((id) HostConfig_) {
                     [CachedURLs_ addObject:url];
                 }
             }
@@ -9384,7 +9388,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 }
 
 - (void) _saveConfig {
-    @synchronized (database_) {
+    @synchronized ((id) database_) {
         _trace();
         MetaFile_.Sync();
         _trace();
@@ -9469,7 +9473,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 }
 
 - (void) reloadDataWithInvocation:(NSInvocation *)invocation {
-@synchronized (self) {
+@synchronized ((id) self) {
     UIProgressHUD *hud(loaded_ ? [self addProgressHUD] : nil);
     [hud setText:UCLocalize("RELOADING_DATA")];
 
@@ -9638,13 +9642,13 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 }
 
 - (void) queue {
-    @synchronized (self) {
+    @synchronized ((id) self) {
         [self perform];
     }
 }
 
 - (void) clearPackage:(Package *)package {
-    @synchronized (self) {
+    @synchronized ((id) self) {
         [package clear];
         [self resolve];
         [self perform];
@@ -9652,7 +9656,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 }
 
 - (void) installPackages:(NSArray *)packages {
-    @synchronized (self) {
+    @synchronized ((id) self) {
         for (Package *package in packages)
             [package install];
         [self resolve];
@@ -9661,7 +9665,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 }
 
 - (void) installPackage:(Package *)package {
-    @synchronized (self) {
+    @synchronized ((id) self) {
         [package install];
         [self resolve];
         [self perform];
@@ -9669,7 +9673,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 }
 
 - (void) removePackage:(Package *)package {
-    @synchronized (self) {
+    @synchronized ((id) self) {
         [package remove];
         [self resolve];
         [self perform];
@@ -9677,7 +9681,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 }
 
 - (void) distUpgrade {
-    @synchronized (self) {
+    @synchronized ((id) self) {
         if (![database_ upgrade])
             return;
         [self perform];
@@ -9734,7 +9738,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 }
 
 - (void) cancelAndClear:(bool)clear {
-    @synchronized (self) {
+    @synchronized ((id) self) {
         if (clear) {
             [database_ clear];
             Queuing_ = false;
@@ -9760,7 +9764,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
         [alert dismissWithClickedButtonIndex:-1 animated:YES];
     } else if ([context isEqualToString:@"fixhalf"]) {
         if (button == [alert cancelButtonIndex]) {
-            @synchronized (self) {
+            @synchronized ((id) self) {
                 for (Package *broken in (id) broken_) {
                     [broken remove];
 
@@ -9782,7 +9786,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
         [alert dismissWithClickedButtonIndex:-1 animated:YES];
     } else if ([context isEqualToString:@"upgrade"]) {
         if (button == [alert firstOtherButtonIndex]) {
-            @synchronized (self) {
+            @synchronized ((id) self) {
                 for (Package *essential in (id) essential_)
                     [essential install];
 
@@ -10149,7 +10153,7 @@ _trace();
     if ([self respondsToSelector:@selector(setApplicationSupportsShakeToEdit:)])
         [self setApplicationSupportsShakeToEdit:NO];
 
-    @synchronized (HostConfig_) {
+    @synchronized ((id) HostConfig_) {
         [BridgedHosts_ addObject:[[NSURL URLWithString:CydiaURL(@"")] host]];
     }
 
@@ -10412,7 +10416,7 @@ MSHook(id, NSURLConnection$init$, NSURLConnection *self, SEL _cmd, NSURLRequest 
 
     NSString *compound([NSString stringWithFormat:@"%@:%@", scheme, host]);
 
-    @synchronized (HostConfig_) {
+    @synchronized ((id) HostConfig_) {
         if ([copy respondsToSelector:@selector(setHTTPShouldUsePipelining:)])
             if ([PipelinedHosts_ containsObject:host] || [PipelinedHosts_ containsObject:compound])
                 [copy setHTTPShouldUsePipelining:YES];
@@ -10438,7 +10442,7 @@ MSHook(id, NSURLConnection$init$, NSURLConnection *self, SEL _cmd, NSURLRequest 
 
 Class $WAKWindow;
 
-static CGSize $WAKWindow$screenSize(WAKWindow self, SEL _cmd) {
+static CGSize $WAKWindow$screenSize(WAKWindow *self, SEL _cmd) {
     CGSize size([[UIScreen mainScreen] bounds].size);
     /*if ([$WAKWindow respondsToSelector:@selector(hasLandscapeOrientation)])
         if ([$WAKWindow hasLandscapeOrientation])
@@ -10488,7 +10492,7 @@ int main(int argc, char *argv[]) {
     SessionData_ = [NSMutableDictionary dictionaryWithCapacity:4];
 
     HostConfig_ = [[[NSObject alloc] init] autorelease];
-    @synchronized (HostConfig_) {
+    @synchronized ((id) HostConfig_) {
         BridgedHosts_ = [NSMutableSet setWithCapacity:4];
         TokenHosts_ = [NSMutableSet setWithCapacity:4];
         InsecureHosts_ = [NSMutableSet setWithCapacity:4];
