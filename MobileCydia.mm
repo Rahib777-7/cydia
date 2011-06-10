@@ -229,7 +229,6 @@ extern NSString *Cydia_;
 #define ManualRefresh (1 && !ForRelease)
 #define ShowInternals (0 && !ForRelease)
 #define AlwaysReload (0 && !ForRelease)
-#define TryIndexedCollation (0 && !ForRelease)
 
 #if !TraceLogging
 #undef _trace
@@ -5495,11 +5494,10 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     _H<NSString> source_;
     _H<UIImage> badge_;
     _H<UIImage> placard_;
-    bool summarized_;
 }
 
 - (PackageCell *) init;
-- (void) setPackage:(Package *)package asSummary:(bool)summary;
+- (void) setPackage:(Package *)package;
 
 - (void) drawContentRect:(CGRect)rect;
 
@@ -5526,9 +5524,7 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     return [NSString stringWithFormat:UCLocalize("COLON_DELIMITED"), (id) name_, (id) description_];
 }
 
-- (void) setPackage:(Package *)package asSummary:(bool)summary {
-    summarized_ = summary;
-
+- (void) setPackage:(Package *)package {
     icon_ = nil;
     name_ = nil;
     description_ = nil;
@@ -5617,50 +5613,7 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     [content_ setNeedsDisplay];
 }
 
-- (void) drawSummaryContentRect:(CGRect)rect {
-    bool highlighted(highlighted_);
-    float width([self bounds].size.width);
-
-    if (icon_ != nil) {
-        CGRect rect;
-        rect.size = [(UIImage *) icon_ size];
-
-        while (rect.size.width > 16 || rect.size.height > 16) {
-            rect.size.width /= 2;
-            rect.size.height /= 2;
-        }
-
-        rect.origin.x = 18 - rect.size.width / 2;
-        rect.origin.y = 18 - rect.size.height / 2;
-
-        [icon_ drawInRect:rect];
-    }
-
-    if (badge_ != nil) {
-        CGRect rect;
-        rect.size = [(UIImage *) badge_ size];
-
-        rect.size.width /= 4;
-        rect.size.height /= 4;
-
-        rect.origin.x = 23 - rect.size.width / 2;
-        rect.origin.y = 23 - rect.size.height / 2;
-
-        [badge_ drawInRect:rect];
-    }
-
-    if (highlighted)
-        UISetColor(White_);
-
-    if (!highlighted)
-        UISetColor(commercial_ ? Purple_ : Black_);
-    [name_ drawAtPoint:CGPointMake(36, 8) forWidth:(width - (placard_ == nil ? 68 : 94)) withFont:Font18Bold_ lineBreakMode:UILineBreakModeTailTruncation];
-
-    if (placard_ != nil)
-        [placard_ drawAtPoint:CGPointMake(width - 52, 9)];
-}
-
-- (void) drawNormalContentRect:(CGRect)rect {
+- (void) drawContentRect:(CGRect)rect {
     bool highlighted(highlighted_);
     float width([self bounds].size.width);
 
@@ -5706,13 +5659,6 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 
     if (placard_ != nil)
         [placard_ drawAtPoint:CGPointMake(width - 52, 9)];
-}
-
-- (void) drawContentRect:(CGRect)rect {
-    if (summarized_)
-        [self drawSummaryContentRect:rect];
-    else
-        [self drawNormalContentRect:rect];
 }
 
 @end
@@ -6124,24 +6070,135 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 /* }}} */
 
 /* Package List Controller {{{ */
-@interface PackageListController : CyteViewController <
-    UITableViewDataSource,
-    UITableViewDelegate
-> {
+@interface PackageListDataSource : NSObject <UITableViewDataSource> {
     _transient Database *database_;
     unsigned era_;
     _H<NSArray> packages_;
     _H<NSMutableArray> sections_;
-    _H<UITableView, 2> list_;
     _H<NSMutableArray> index_;
     _H<NSMutableDictionary> indices_;
+}
+
+@end
+
+@implementation PackageListDataSource
+
+- (id) initWithDatabase:(Database *)database {
+    if ((self = [super init]) != nil) {
+        database_ = database;
+    } return self;
+}
+
+- (Package *) packageAtIndexPath:(NSIndexPath *)path {
+@synchronized (database_) {
+    if ([database_ era] != era_)
+        return nil;
+
+    Section *section([sections_ objectAtIndex:[path section]]);
+    NSInteger row([path row]);
+    Package *package([packages_ objectAtIndex:([section row] + row)]);
+    return [[package retain] autorelease];
+} }
+
+- (NSArray *) sectionIndexTitlesForTableView:(UITableView *)tableView {
+    return index_;
+}
+
+- (UITableViewCell *) tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
+    PackageCell *cell((PackageCell *) [table dequeueReusableCellWithIdentifier:@"Package"]);
+    if (cell == nil)
+        cell = [[[PackageCell alloc] init] autorelease];
+
+    Package *package([database_ packageWithName:[[self packageAtIndexPath:path] id]]);
+    [cell setPackage:package];
+    return cell;
+}
+
+- (NSInteger) numberOfSectionsInTableView:(UITableView *)list {
+    NSInteger count([sections_ count]);
+    return count == 0 ? 1 : count;
+}
+
+- (NSString *) tableView:(UITableView *)list titleForHeaderInSection:(NSInteger)section {
+    if ([sections_ count] == 0 || [[sections_ objectAtIndex:section] count] == 0)
+        return nil;
+    return [[sections_ objectAtIndex:section] name];
+}
+
+- (NSInteger) tableView:(UITableView *)list numberOfRowsInSection:(NSInteger)section {
+    if ([sections_ count] == 0)
+        return 0;
+    return [[sections_ objectAtIndex:section] count];
+}
+
+- (NSInteger) tableView:(UITableView *)tableView sectionForSectionIndexTitle:(NSString *)title atIndex:(NSInteger)index {
+    return index;
+}
+
+- (NSMutableArray *) _reloadPackages {
+@synchronized (database_) {
+    era_ = [database_ era];
+    NSArray *packages([database_ packages]);
+
+    return [NSMutableArray arrayWithArray:packages];
+} }
+
+- (void) reloadData {
+    NSArray *packages;
+
+  reload:
+    packages = [self _reloadPackages];
+
+@synchronized (database_) {
+    if (era_ != [database_ era])
+        goto reload;
+
+    packages_ = packages;
+
+    indices_ = [NSMutableDictionary dictionaryWithCapacity:32];
+    sections_ = [NSMutableArray arrayWithCapacity:16];
+
+    Section *section = nil;
+    index_ = [NSMutableArray arrayWithCapacity:32];
+
+    _profile(PackageTable$reloadData$Section)
+        for (size_t offset(0), end([packages_ count]); offset != end; ++offset) {
+            Package *package;
+            unichar index;
+
+            _profile(PackageTable$reloadData$Section$Package)
+                package = [packages_ objectAtIndex:offset];
+                index = [package index];
+            _end
+
+            if (section == nil || [section index] != index) {
+                _profile(PackageTable$reloadData$Section$Allocate)
+                    section = [[[Section alloc] initWithIndex:index row:offset] autorelease];
+                _end
+
+                [index_ addObject:[section name]];
+                //[indices_ setObject:[NSNumber numberForInt:[sections_ count]] forKey:index];
+
+                _profile(PackageTable$reloadData$Section$Add)
+                    [sections_ addObject:section];
+                _end
+            }
+
+            [section addToCount];
+        }
+    _end
+} }
+
+@end
+
+@interface PackageListController : CyteViewController <UITableViewDelegate> {
+    _transient Database *database_;
+    _H<PackageListDataSource> datasource_;
+    _H<UITableView, 2> list_;
     _H<NSString> title_;
-    unsigned reloading_;
 }
 
 - (id) initWithDatabase:(Database *)database title:(NSString *)title;
-- (void) setDelegate:(id)delegate;
-- (void) resetCursor;
 - (void) clearData;
 
 @end
@@ -6150,14 +6207,6 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 
 - (NSURL *) referrerURL {
     return [self navigationURL];
-}
-
-- (bool) isSummarized {
-    return false;
-}
-
-- (bool) showsSections {
-    return true;
 }
 
 - (void) deselectWithAnimation:(BOOL)animated {
@@ -6255,75 +6304,10 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     [[self navigationController] pushViewController:view animated:YES];
 }
 
-#if TryIndexedCollation
-+ (BOOL) hasIndexedCollation {
-    return NO; // XXX: objc_getClass("UILocalizedIndexedCollation") != nil;
-}
-#endif
-
-- (NSInteger) numberOfSectionsInTableView:(UITableView *)list {
-    NSInteger count([sections_ count]);
-    return count == 0 ? 1 : count;
-}
-
-- (NSString *) tableView:(UITableView *)list titleForHeaderInSection:(NSInteger)section {
-    if ([sections_ count] == 0 || [[sections_ objectAtIndex:section] count] == 0)
-        return nil;
-    return [[sections_ objectAtIndex:section] name];
-}
-
-- (NSInteger) tableView:(UITableView *)list numberOfRowsInSection:(NSInteger)section {
-    if ([sections_ count] == 0)
-        return 0;
-    return [[sections_ objectAtIndex:section] count];
-}
-
-- (Package *) packageAtIndexPath:(NSIndexPath *)path {
-@synchronized (database_) {
-    if ([database_ era] != era_)
-        return nil;
-
-    Section *section([sections_ objectAtIndex:[path section]]);
-    NSInteger row([path row]);
-    Package *package([packages_ objectAtIndex:([section row] + row)]);
-    return [[package retain] autorelease];
-} }
-
-- (UITableViewCell *) tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
-    PackageCell *cell((PackageCell *) [table dequeueReusableCellWithIdentifier:@"Package"]);
-    if (cell == nil)
-        cell = [[[PackageCell alloc] init] autorelease];
-
-    Package *package([database_ packageWithName:[[self packageAtIndexPath:path] id]]);
-    [cell setPackage:package asSummary:[self isSummarized]];
-    return cell;
-}
-
 - (void) tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)path {
-    Package *package([self packageAtIndexPath:path]);
+    Package *package([datasource_ packageAtIndexPath:path]);
     package = [database_ packageWithName:[package id]];
     [self didSelectPackage:package];
-}
-
-- (NSArray *) sectionIndexTitlesForTableView:(UITableView *)tableView {
-    if (![self showsSections])
-        return nil;
-
-    return index_;
-}
-
-- (NSInteger) tableView:(UITableView *)tableView sectionForSectionIndexTitle:(NSString *)title atIndex:(NSInteger)index {
-#if TryIndexedCollation
-    if ([[self class] hasIndexedCollation]) {
-        return [[objc_getClass("UILocalizedIndexedCollation") currentCollation] sectionForSectionIndexTitleAtIndex:index];
-    }
-#endif
-
-    return index;
-}
-
-- (void) updateHeight {
-    [list_ setRowHeight:([self isSummarized] ? 38 : 73)];
 }
 
 - (id) initWithDatabase:(Database *)database title:(NSString *)title {
@@ -6334,10 +6318,17 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     } return self;
 }
 
++ (Class) dataSourceClass {
+    return [PackageListDataSource class];
+}
+
 - (void) loadView {
     UIView *view([[[UIView alloc] initWithFrame:[[UIScreen mainScreen] applicationFrame]] autorelease]);
+    [view setBackgroundColor:[UIColor whiteColor]];
     [view setAutoresizingMask:(UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight)];
     [self setView:view];
+
+    datasource_ = [[[[[self class] dataSourceClass] alloc] initWithDatabase:database_] autorelease];
 
     list_ = [[[UITableView alloc] initWithFrame:[[self view] bounds] style:UITableViewStylePlain] autorelease];
     [list_ setAutoresizingMask:UIViewAutoresizingFlexibleBoth];
@@ -6345,208 +6336,54 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 
     // XXX: is 20 the most optimal number here?
     [list_ setSectionIndexMinimumDisplayRowCount:20];
+    [list_ setRowHeight:73];
 
-    [(UITableView *) list_ setDataSource:self];
+    [(UITableView *) list_ setDataSource:datasource_];
     [list_ setDelegate:self];
-
-    [self updateHeight];
 }
 
 - (void) releaseSubviews {
     list_ = nil;
-
-    packages_ = nil;
-    sections_ = nil;
-    index_ = nil;
-    indices_ = nil;
+    datasource_ = nil;
 
     [super releaseSubviews];
 }
 
-- (void) setDelegate:(id)delegate {
-    delegate_ = delegate;
-}
-
-- (bool) shouldYield {
-    return false;
-}
-
-- (bool) shouldBlock {
-    return false;
-}
-
-- (NSMutableArray *) _reloadPackages {
-@synchronized (database_) {
-    era_ = [database_ era];
-    NSArray *packages([database_ packages]);
-
-    return [NSMutableArray arrayWithArray:packages];
-} }
-
-- (void) _reloadData {
-    if (reloading_ != 0) {
-        reloading_ = 2;
-        return;
-    }
-
-    NSArray *packages;
-
-  reload:
-    if ([self shouldYield]) {
-        do {
-            UIProgressHUD *hud;
-
-            if (![self shouldBlock])
-                hud = nil;
-            else {
-                hud = [delegate_ addProgressHUD];
-                [hud setText:UCLocalize("LOADING")];
-            }
-
-            reloading_ = 1;
-            packages = [self yieldToSelector:@selector(_reloadPackages)];
-
-            if (hud != nil)
-                [delegate_ removeProgressHUD:hud];
-        } while (reloading_ == 2);
-    } else {
-        packages = [self _reloadPackages];
-    }
-
-@synchronized (database_) {
-    if (era_ != [database_ era])
-        goto reload;
-    reloading_ = 0;
-
-    packages_ = packages;
-
-    indices_ = [NSMutableDictionary dictionaryWithCapacity:32];
-    sections_ = [NSMutableArray arrayWithCapacity:16];
-
-    Section *section = nil;
-
-#if TryIndexedCollation
-    if ([[self class] hasIndexedCollation]) {
-        index_ = [[objc_getClass("UILocalizedIndexedCollation") currentCollation] sectionIndexTitles];
-
-        id collation = [objc_getClass("UILocalizedIndexedCollation") currentCollation];
-        NSArray *titles = [collation sectionIndexTitles];
-        int secidx = -1;
-
-        _profile(PackageTable$reloadData$Section)
-            for (size_t offset(0), end([packages_ count]); offset != end; ++offset) {
-                Package *package;
-                int index;
-
-                _profile(PackageTable$reloadData$Section$Package)
-                    package = [packages_ objectAtIndex:offset];
-                    index = [collation sectionForObject:package collationStringSelector:@selector(name)];
-                _end
-
-                while (secidx < index) {
-                    secidx += 1;
-
-                    _profile(PackageTable$reloadData$Section$Allocate)
-                        section = [[[Section alloc] initWithName:[titles objectAtIndex:secidx] row:offset localize:NO] autorelease];
-                    _end
-
-                    _profile(PackageTable$reloadData$Section$Add)
-                        [sections_ addObject:section];
-                    _end
-                }
-
-                [section addToCount];
-            }
-        _end
-    } else
-#endif
-    {
-        index_ = [NSMutableArray arrayWithCapacity:32];
-
-        bool sectioned([self showsSections]);
-        if (!sectioned) {
-            section = [[[Section alloc] initWithName:nil localize:false] autorelease];
-            [sections_ addObject:section];
-        }
-
-        _profile(PackageTable$reloadData$Section)
-            for (size_t offset(0), end([packages_ count]); offset != end; ++offset) {
-                Package *package;
-                unichar index;
-
-                _profile(PackageTable$reloadData$Section$Package)
-                    package = [packages_ objectAtIndex:offset];
-                    index = [package index];
-                _end
-
-                if (sectioned && (section == nil || [section index] != index)) {
-                    _profile(PackageTable$reloadData$Section$Allocate)
-                        section = [[[Section alloc] initWithIndex:index row:offset] autorelease];
-                    _end
-
-                    [index_ addObject:[section name]];
-                    //[indices_ setObject:[NSNumber numberForInt:[sections_ count]] forKey:index];
-
-                    _profile(PackageTable$reloadData$Section$Add)
-                        [sections_ addObject:section];
-                    _end
-                }
-
-                [section addToCount];
-            }
-        _end
-    }
-
-    [self updateHeight];
-
-    _profile(PackageTable$reloadData$List)
-        [(UITableView *) list_ setDataSource:self];
-        [list_ reloadData];
-    _end
-} }
-
 - (void) reloadData {
     [super reloadData];
 
-    if ([self shouldYield])
-        [self performSelector:@selector(_reloadData) withObject:nil afterDelay:0];
-    else
-        [self _reloadData];
+    [datasource_ reloadData];
+    [list_ reloadData];
 }
 
-- (void) resetCursor {
+- (void) resetScrollPosition {
     [list_ scrollRectToVisible:CGRectMake(0, 0, 1, 1) animated:NO];
 }
 
 - (void) clearData {
-    [self updateHeight];
-
+    datasource_ = nil;
     [list_ setDataSource:nil];
     [list_ reloadData];
 
-    [self resetCursor];
+    [self resetScrollPosition];
 }
 
 @end
 /* }}} */
 /* Filtered Package List Controller {{{ */
-@interface FilteredPackageListController : PackageListController {
+
+@interface FilteredPackageListDataSource : PackageListDataSource {
     SEL filter_;
     IMP imp_;
     _H<NSObject> object_;
 }
 
-- (void) setObject:(id)object;
-- (void) setObject:(id)object forFilter:(SEL)filter;
-
-- (SEL) filter;
-- (void) setFilter:(SEL)filter;
-
-- (id) initWithDatabase:(Database *)database title:(NSString *)title filter:(SEL)filter with:(id)object;
+@property (assign) SEL filter;
+@property (assign) id object;
 
 @end
 
-@implementation FilteredPackageListController
+@implementation FilteredPackageListDataSource
 
 - (SEL) filter {
     return filter_;
@@ -6563,18 +6400,18 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     _assert(imp_ != NULL);
 } }
 
+- (id) object {
+    return object_;
+}
+
 - (void) setObject:(id)object {
 @synchronized (self) {
     object_ = object;
 } }
 
-- (void) setObject:(id)object forFilter:(SEL)filter {
-@synchronized (self) {
-    [self setFilter:filter];
-    [self setObject:object];
-} }
-
 - (NSMutableArray *) _reloadPackages {
+    NSLog(@"reload packages");
+
 @synchronized (database_) {
     era_ = [database_ era];
     NSArray *packages([database_ packages]);
@@ -6598,13 +6435,41 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     _end
 
     return filtered;
-} }
+} NSLog(@"done"); }
 
-- (id) initWithDatabase:(Database *)database title:(NSString *)title filter:(SEL)filter with:(id)object {
-    if ((self = [super initWithDatabase:database title:title]) != nil) {
-        [self setFilter:filter];
-        [self setObject:object];
-    } return self;
+@end
+
+@interface FilteredPackageListController : PackageListController {
+}
+
+@end
+
+@implementation FilteredPackageListController
+
++ (Class) dataSourceClass {
+    return [FilteredPackageListDataSource class];
+}
+
+- (SEL) filter {
+    return [datasource_ filter];
+}
+
+- (void) setFilter:(SEL)filter {
+    [datasource_ setFilter:filter];
+}
+
+- (id) object {
+    return [datasource_ object];
+}
+
+- (void) setObject:(id)object {
+    [datasource_ setObject:object];
+}
+
+- (void)setFilter:(SEL)filter object:(id)object {
+    NSLog(@"set filter: %@ object: %@", NSStringFromSelector(filter), object);
+    [datasource_ setFilter:filter];
+    [datasource_ setObject:object];
 }
 
 @end
@@ -7353,14 +7218,15 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
     else
         title = UCLocalize("NO_SECTION");
 
-    if ((self = [super initWithDatabase:database title:title filter:@selector(isVisibleInSection:) with:name]) != nil) {
+    if ((self = [super initWithDatabase:database title:title]) != nil) {
+        [self setFilter:@selector(isVisibleInSection:) object:name];
         indirect_ = [[[IndirectDelegate alloc] initWithDelegate:self] autorelease];
         cydia_ = [[[CydiaObject alloc] initWithDelegate:indirect_] autorelease];
         section_ = name;
     } return self;
 }
 
-- (NSInteger) numberOfSectionsInTableView:(UITableView *)list {
+/*- (NSInteger) numberOfSectionsInTableView:(UITableView *)list {
     return [super numberOfSectionsInTableView:list] + 1;
 }
 
@@ -7391,7 +7257,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 - (NSInteger) tableView:(UITableView *)tableView sectionForSectionIndexTitle:(NSString *)title atIndex:(NSInteger)index {
     NSInteger section([super tableView:tableView sectionForSectionIndexTitle:title atIndex:index]);
     return section == 0 ? 0 : section + 1;
-}
+}*/
 
 - (void) webView:(WebView *)view decidePolicyForNewWindowAction:(NSDictionary *)action request:(NSURLRequest *)request newFrameName:(NSString *)frame decisionListener:(id<WebPolicyDecisionListener>)listener {
     NSURL *url([request URL]);
@@ -7662,18 +7528,114 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 /* }}} */
 
 /* Changes Controller {{{ */
-@interface ChangesController : CyteViewController <
-    CyteWebViewDelegate,
-    UITableViewDataSource,
-    UITableViewDelegate
-> {
-    _transient Database *database_;
-    unsigned era_;
-    _H<NSMutableArray> packages_;
-    _H<NSMutableArray> sections_;
-    _H<UITableView, 2> list_;
-    _H<CyteWebView, 1> dickbar_;
+@interface ChangesPackageListDataSource : PackageListDataSource {
     unsigned upgrades_;
+}
+
+@end
+
+@implementation ChangesPackageListDataSource
+
+- (NSMutableArray *) _reloadPackages {
+@synchronized (database_) {
+    era_ = [database_ era];
+    NSArray *packages([database_ packages]);
+
+    NSMutableArray *filtered([NSMutableArray arrayWithCapacity:[packages count]]);
+
+    _trace();
+    _profile(ChangesPackageListController$_reloadPackages$Filter)
+        for (Package *package in packages)
+            if ([package upgradableAndEssential:YES] || [package visible])
+                CFArrayAppendValue((CFMutableArrayRef) filtered, package);
+    _end
+    _trace();
+    _profile(ChangesPackageListController$_reloadPackages$radixSort)
+        [filtered radixSortUsingFunction:reinterpret_cast<MenesRadixSortFunction>(&PackageChangesRadix) withContext:NULL];
+    _end
+    _trace();
+
+    return filtered;
+} }
+
+- (void) reloadData {
+    NSArray *packages = [self _reloadPackages];
+
+@synchronized (database_) {
+    packages_ = packages;
+    sections_ = [NSMutableArray arrayWithCapacity:16];
+
+    Section *upgradable = [[[Section alloc] initWithName:UCLocalize("AVAILABLE_UPGRADES") localize:NO] autorelease];
+    Section *ignored = nil;
+    Section *section = nil;
+    time_t last = 0;
+
+    upgrades_ = 0;
+    bool unseens = false;
+
+    CFDateFormatterRef formatter(CFDateFormatterCreate(NULL, Locale_, kCFDateFormatterMediumStyle, kCFDateFormatterMediumStyle));
+
+    for (size_t offset = 0, count = [packages_ count]; offset != count; ++offset) {
+        Package *package = [packages_ objectAtIndex:offset];
+
+        BOOL uae = [package upgradableAndEssential:YES];
+
+        if (!uae) {
+            unseens = true;
+            time_t seen([package seen]);
+
+            if (section == nil || last != seen) {
+                last = seen;
+
+                NSString *name;
+                name = (NSString *) CFDateFormatterCreateStringWithDate(NULL, formatter, (CFDateRef) [NSDate dateWithTimeIntervalSince1970:seen]);
+                [name autorelease];
+
+                _profile(ChangesPackageListController$reloadData$Allocate)
+                    name = [NSString stringWithFormat:UCLocalize("NEW_AT"), name];
+                    section = [[[Section alloc] initWithName:name row:offset localize:NO] autorelease];
+                    [sections_ addObject:section];
+                _end
+            }
+
+            [section addToCount];
+        } else if ([package ignored]) {
+            if (ignored == nil) {
+                ignored = [[[Section alloc] initWithName:UCLocalize("IGNORED_UPGRADES") row:offset localize:NO] autorelease];
+            }
+            [ignored addToCount];
+        } else {
+            ++upgrades_;
+            [upgradable addToCount];
+        }
+    }
+    _trace();
+
+    CFRelease(formatter);
+
+    if (unseens) {
+        Section *last = [sections_ lastObject];
+        size_t count = [last count];
+        [packages_ removeObjectsInRange:NSMakeRange([packages_ count] - count, count)];
+        [sections_ removeLastObject];
+    }
+
+    if ([ignored count] != 0)
+        [sections_ insertObject:ignored atIndex:0];
+    if (upgrades_ != 0)
+        [sections_ insertObject:upgradable atIndex:0];
+} }
+
+- (int) upgrades {
+    return upgrades_;
+}
+
+@end
+
+@interface ChangesPackageListController : PackageListController <
+    CyteWebViewDelegate
+> {
+    _H<CyteWebView, 1> dickbar_;
     _H<IndirectDelegate, 1> indirect_;
     _H<CydiaObject> cydia_;
 }
@@ -7682,7 +7644,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 
 @end
 
-@implementation ChangesController
+@implementation ChangesPackageListController
 
 - (NSURL *) navigationURL {
     return [NSURL URLWithString:@"cydia://changes"];
@@ -7693,52 +7655,15 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
     [list_ deselectRowAtIndexPath:[list_ indexPathForSelectedRow] animated:animated];
 }
 
-- (NSInteger) numberOfSectionsInTableView:(UITableView *)list {
-    NSInteger count([sections_ count]);
-    return count == 0 ? 1 : count;
-}
-
-- (NSString *) tableView:(UITableView *)list titleForHeaderInSection:(NSInteger)section {
-    if ([sections_ count] == 0)
-        return nil;
-    return [[sections_ objectAtIndex:section] name];
-}
-
-- (NSInteger) tableView:(UITableView *)list numberOfRowsInSection:(NSInteger)section {
-    if ([sections_ count] == 0)
-        return 0;
-    return [[sections_ objectAtIndex:section] count];
-}
-
-- (Package *) packageAtIndexPath:(NSIndexPath *)path {
-@synchronized (database_) {
-    if ([database_ era] != era_)
-        return nil;
-
-    NSUInteger sectionIndex([path section]);
-    if (sectionIndex >= [sections_ count])
-        return nil;
-    Section *section([sections_ objectAtIndex:sectionIndex]);
-    NSInteger row([path row]);
-    return [[[packages_ objectAtIndex:([section row] + row)] retain] autorelease];
-} }
-
-- (UITableViewCell *) tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
-    PackageCell *cell((PackageCell *) [table dequeueReusableCellWithIdentifier:@"Package"]);
-    if (cell == nil)
-        cell = [[[PackageCell alloc] init] autorelease];
-
-    Package *package([database_ packageWithName:[[self packageAtIndexPath:path] id]]);
-    [cell setPackage:package asSummary:false];
-    return cell;
-}
-
-- (NSIndexPath *) tableView:(UITableView *)table willSelectRowAtIndexPath:(NSIndexPath *)path {
-    Package *package([self packageAtIndexPath:path]);
+- (void) tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)path {
+    Package *package([datasource_ packageAtIndexPath:path]);
     CYPackageController *view([[[CYPackageController alloc] initWithDatabase:database_ forPackage:[package id] withReferrer:[NSString stringWithFormat:@"%@/#!/changes/", UI_]] autorelease]);
     [view setDelegate:delegate_];
     [[self navigationController] pushViewController:view animated:YES];
-    return path;
+}
+
++ (Class) dataSourceClass {
+    return [ChangesPackageListDataSource class];
 }
 
 - (void) alertView:(UIAlertView *)alert clickedButtonAtIndex:(NSInteger)button {
@@ -7772,24 +7697,15 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 }
 
 - (void) loadView {
-    UIView *view([[[UIView alloc] initWithFrame:[[UIScreen mainScreen] applicationFrame]] autorelease]);
-    [view setAutoresizingMask:(UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight)];
-    [self setView:view];
-
-    list_ = [[[UITableView alloc] initWithFrame:[view bounds] style:UITableViewStylePlain] autorelease];
-    [list_ setAutoresizingMask:UIViewAutoresizingFlexibleBoth];
-    [list_ setRowHeight:73];
-    [(UITableView *) list_ setDataSource:self];
-    [list_ setDelegate:self];
-    [view addSubview:list_];
+    [super loadView];
 
     if (AprilFools_ && kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iPhoneOS_3_0) {
-        CGRect dickframe([view bounds]);
+        CGRect dickframe([[self view] bounds]);
         dickframe.size.height = 44;
 
         dickbar_ = [[[CyteWebView alloc] initWithFrame:dickframe] autorelease];
         [dickbar_ setDelegate:self];
-        [view addSubview:dickbar_];
+        [[self view] addSubview:dickbar_];
 
         [dickbar_ setBackgroundColor:[UIColor clearColor]];
         [dickbar_ setScalesPageToFit:YES];
@@ -7861,137 +7777,25 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
     [cydia_ setDelegate:delegate];
 }
 
-- (void) viewDidLoad {
-    [super viewDidLoad];
-
-    [[self navigationItem] setTitle:(AprilFools_ ? @"Timeline" : UCLocalize("CHANGES"))];
-}
-
 - (void) releaseSubviews {
-    list_ = nil;
-
-    packages_ = nil;
-    sections_ = nil;
     dickbar_ = nil;
 
     [super releaseSubviews];
 }
 
 - (id) initWithDatabase:(Database *)database {
-    if ((self = [super init]) != nil) {
+    if ((self = [super initWithDatabase:database title:(AprilFools_ ? @"Timeline" : UCLocalize("CHANGES"))]) != nil) {
         indirect_ = [[[IndirectDelegate alloc] initWithDelegate:self] autorelease];
         cydia_ = [[[CydiaObject alloc] initWithDelegate:indirect_] autorelease];
         database_ = database;
     } return self;
 }
 
-- (NSMutableArray *) _reloadPackages {
-@synchronized (database_) {
-    era_ = [database_ era];
-    NSArray *packages([database_ packages]);
+- (void) reloadData {
+    [super reloadData];
 
-    NSMutableArray *filtered([NSMutableArray arrayWithCapacity:[packages count]]);
-
-    _trace();
-    _profile(ChangesController$_reloadPackages$Filter)
-        for (Package *package in packages)
-            if ([package upgradableAndEssential:YES] || [package visible])
-                CFArrayAppendValue((CFMutableArrayRef) filtered, package);
-    _end
-    _trace();
-    _profile(ChangesController$_reloadPackages$radixSort)
-        [filtered radixSortUsingFunction:reinterpret_cast<MenesRadixSortFunction>(&PackageChangesRadix) withContext:NULL];
-    _end
-    _trace();
-
-    return filtered;
-} }
-
-- (void) _reloadData {
-    NSMutableArray *packages;
-
-  reload:
-    if (true) {
-        UIProgressHUD *hud([delegate_ addProgressHUD]);
-        [hud setText:UCLocalize("LOADING")];
-        //NSLog(@"HUD:%@::%@", delegate_, hud);
-        packages = [self yieldToSelector:@selector(_reloadPackages)];
-        [delegate_ removeProgressHUD:hud];
-    } else {
-        packages = [self _reloadPackages];
-    }
-
-@synchronized (database_) {
-    if (era_ != [database_ era])
-        goto reload;
-
-    packages_ = packages;
-    sections_ = [NSMutableArray arrayWithCapacity:16];
-
-    Section *upgradable = [[[Section alloc] initWithName:UCLocalize("AVAILABLE_UPGRADES") localize:NO] autorelease];
-    Section *ignored = nil;
-    Section *section = nil;
-    time_t last = 0;
-
-    upgrades_ = 0;
-    bool unseens = false;
-
-    CFDateFormatterRef formatter(CFDateFormatterCreate(NULL, Locale_, kCFDateFormatterMediumStyle, kCFDateFormatterMediumStyle));
-
-    for (size_t offset = 0, count = [packages_ count]; offset != count; ++offset) {
-        Package *package = [packages_ objectAtIndex:offset];
-
-        BOOL uae = [package upgradableAndEssential:YES];
-
-        if (!uae) {
-            unseens = true;
-            time_t seen([package seen]);
-
-            if (section == nil || last != seen) {
-                last = seen;
-
-                NSString *name;
-                name = (NSString *) CFDateFormatterCreateStringWithDate(NULL, formatter, (CFDateRef) [NSDate dateWithTimeIntervalSince1970:seen]);
-                [name autorelease];
-
-                _profile(ChangesController$reloadData$Allocate)
-                    name = [NSString stringWithFormat:UCLocalize("NEW_AT"), name];
-                    section = [[[Section alloc] initWithName:name row:offset localize:NO] autorelease];
-                    [sections_ addObject:section];
-                _end
-            }
-
-            [section addToCount];
-        } else if ([package ignored]) {
-            if (ignored == nil) {
-                ignored = [[[Section alloc] initWithName:UCLocalize("IGNORED_UPGRADES") row:offset localize:NO] autorelease];
-            }
-            [ignored addToCount];
-        } else {
-            ++upgrades_;
-            [upgradable addToCount];
-        }
-    }
-    _trace();
-
-    CFRelease(formatter);
-
-    if (unseens) {
-        Section *last = [sections_ lastObject];
-        size_t count = [last count];
-        [packages_ removeObjectsInRange:NSMakeRange([packages_ count] - count, count)];
-        [sections_ removeLastObject];
-    }
-
-    if ([ignored count] != 0)
-        [sections_ insertObject:ignored atIndex:0];
-    if (upgrades_ != 0)
-        [sections_ insertObject:upgradable atIndex:0];
-
-    [list_ reloadData];
-
-    [[self navigationItem] setRightBarButtonItem:(upgrades_ == 0 ? nil : [[[UIBarButtonItem alloc]
-        initWithTitle:[NSString stringWithFormat:UCLocalize("PARENTHETICAL"), UCLocalize("UPGRADE"), [NSString stringWithFormat:@"%u", upgrades_]]
+    [[self navigationItem] setRightBarButtonItem:([datasource_ upgrades] ? nil : [[[UIBarButtonItem alloc]
+        initWithTitle:[NSString stringWithFormat:UCLocalize("PARENTHETICAL"), UCLocalize("UPGRADE"), [NSString stringWithFormat:@"%u", [datasource_ upgrades]]]
         style:UIBarButtonItemStylePlain
         target:self
         action:@selector(upgradeButtonClicked)
@@ -8005,11 +7809,6 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
     ] autorelease]) animated:YES];
 
     PrintTimes();
-} }
-
-- (void) reloadData {
-    [super reloadData];
-    [self performSelector:@selector(_reloadData) withObject:nil afterDelay:0];
 }
 
 @end
@@ -8023,7 +7822,6 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 }
 
 - (id) initWithDatabase:(Database *)database query:(NSString *)query;
-- (void) reloadData;
 
 @end
 
@@ -8050,13 +7848,13 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 }
 
 - (void) useSearch {
-    [self setObject:[self termsForQuery:[search_ text]] forFilter:@selector(isUnfilteredAndSearchedForBy:)];
+    [self setFilter:@selector(isUnfilteredAndSearchedForBy:) object:[self termsForQuery:[search_ text]]];
     [self clearData];
     [self reloadData];
 }
 
 - (void) searchBarTextDidBeginEditing:(UISearchBar *)searchBar {
-    [self setObject:[search_ text] forFilter:@selector(isUnfilteredAndSelectedForBy:)];
+    [self setFilter:@selector(isUnfilteredAndSelectedForBy:) object:[search_ text]];
     [self clearData];
     [self reloadData];
 }
@@ -8076,7 +7874,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 }
 
 - (void) searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)text {
-    [self setObject:text forFilter:@selector(isUnfilteredAndSelectedForBy:)];
+    [self setFilter:@selector(isUnfilteredAndSelectedForBy:) object:text];
     [self reloadData];
 }
 
@@ -8088,23 +7886,18 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
     return [self filter] == @selector(isUnfilteredAndSearchedForBy:);
 }
 
-- (bool) isSummarized {
-    return [self filter] == @selector(isUnfilteredAndSelectedForBy:);
-}
-
-- (bool) showsSections {
-    return false;
-}
-
+/*
 - (NSMutableArray *) _reloadPackages {
     NSMutableArray *packages([super _reloadPackages]);
     if ([self filter] == @selector(isUnfilteredAndSearchedForBy:))
         [packages radixSortUsingSelector:@selector(rank)];
     return packages;
-}
+}*/
 
 - (id) initWithDatabase:(Database *)database query:(NSString *)query {
-    if ((self = [super initWithDatabase:database title:UCLocalize("SEARCH") filter:@selector(isUnfilteredAndSearchedForBy:) with:[self termsForQuery:query]])) {
+    if ((self = [super initWithDatabase:database title:UCLocalize("SEARCH")])) {
+        [self setFilter:@selector(isUnfilteredAndSearchedForBy:) object:[self termsForQuery:query]];
+
         search_ = [[[UISearchBar alloc] init] autorelease];
         [search_ setDelegate:self];
 
@@ -8143,7 +7936,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
         object = [self termsForQuery:object];
 
     [self setObject:object];
-    [self resetCursor];
+    [self resetScrollPosition];
 
     [super reloadData];
 }
@@ -8354,7 +8147,8 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 }
 
 - (id) initWithDatabase:(Database *)database {
-    if ((self = [super initWithDatabase:database title:UCLocalize("INSTALLED") filter:@selector(isInstalledAndUnfiltered:) with:[NSNumber numberWithBool:YES]]) != nil) {
+    if ((self = [super initWithDatabase:database title:UCLocalize("INSTALLED") ]) != nil) {
+        [self setFilter:@selector(isInstalledAndUnfiltered:) object:[NSNumber numberWithBool:YES]];
         [self updateRoleButton];
         [self queueStatusDidChange];
     } return self;
@@ -8533,7 +8327,8 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 }
 
 - (id) initWithDatabase:(Database *)database source:(Source *)source {
-    if ((self = [super initWithDatabase:database title:[source label] filter:@selector(isVisibleInSource:) with:source]) != nil) {
+    if ((self = [super initWithDatabase:database title:[source label]]) != nil) {
+        [self setFilter:@selector(isVisibleInSource:) object:source];
         source_ = source;
         key_ = [source key];
     } return self;
@@ -9943,7 +9738,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
         }
 
         if ([base isEqualToString:@"changes"]) {
-            controller = [[[ChangesController alloc] initWithDatabase:database_] autorelease];
+            controller = [[[ChangesPackageListController alloc] initWithDatabase:database_] autorelease];
         }
 
         if ([base isEqualToString:@"installed"]) {
