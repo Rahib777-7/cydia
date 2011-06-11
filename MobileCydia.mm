@@ -5870,12 +5870,12 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     float left(indent_);
     float width(rect.size.width - left);
     if (editing_)
-        width -= 109;
-    else {
+        width -= 149;
+    else
         width -= 62;
-	    [icon_ drawInRect:CGRectMake(indent_, 7, 32, 32)];
-	    left += 40;
-    }
+
+    [icon_ drawInRect:CGRectMake(indent_, 7, 32, 32)];
+	left += 40;
 
     UISetColor(highlighted ? White_ : Black_);
     [name_ drawAtPoint:CGPointMake(left, 9) forWidth:width withFont:Font22Bold_ lineBreakMode:UILineBreakModeTailTruncation];
@@ -5883,7 +5883,7 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     CGSize size = [count_ sizeWithFont:Font14_];
 
     UISetColor(White_);
-    if (count_ != nil && !editing_)
+    if (count_ != nil)
         [count_ drawAtPoint:CGPointMake(indent_ + 5 + (29 - size.width) / 2, 16) withFont:Font12Bold_];
 }
 
