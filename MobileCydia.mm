@@ -6144,7 +6144,7 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 }
 
 - (NSInteger) tableView:(UITableView *)tableView sectionForSectionIndexTitle:(NSString *)title atIndex:(NSInteger)index {
-    if ([[self class] supportsSearch])
+    if ([[self class] supportsSearch]) {
         if (index == 0) {
             [tableView setContentOffset:CGPointZero animated:NO];
             return NSNotFound;
@@ -6164,7 +6164,7 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     return [NSMutableArray arrayWithArray:packages];
 } }
 
-- (NSMutableArray *) searchPackages:(NSMutableArray *)packages {
+- (NSArray *) searchPackages:(NSArray *)packages {
     if (search_ == nil || [search_ length] == 0) return packages;
 
     IMP imp = NULL;
@@ -6178,23 +6178,22 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
         _assert(imp != NULL);
     }
 
-    for (size_t offset(0), end([packages count]); offset != end; ++offset) {
-        if (!(*reinterpret_cast<bool (*)(id, SEL, id)>(imp))([packages objectAtIndex:offset], filter, search_)) {
-            [packages removeObjectAtIndex:offset];
+    NSMutableArray *searched = [NSMutableArray arrayWithCapacity:([packages count] / 4)];
 
-            --offset;
-            --end;
+    for (Package *package in packages) {
+        if ((*reinterpret_cast<bool (*)(id, SEL, id)>(imp))(package, filter, search_)) {
+            [searched addObject:package];
         }
     }
 
-    return packages;
+    return searched;
 }
 
 - (void) reloadData {
     NSArray *packages;
 
   reload:
-    packages = [[self _reloadPackages] mutableCopy];
+    packages = [self _reloadPackages];
     packages = [self searchPackages:packages];
 
 @synchronized (database_) {
