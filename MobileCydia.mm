@@ -6073,6 +6073,7 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 @interface PackageListDataSource : NSObject <UITableViewDataSource> {
     _transient Database *database_;
     unsigned era_;
+    NSString *search_;
     _H<NSArray> packages_;
     _H<NSMutableArray> sections_;
     _H<NSMutableArray> index_;
@@ -6089,6 +6090,14 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     } return self;
 }
 
++ (BOOL) supportsSearch {
+    return YES;
+}
+
+- (void)setSearch:(NSString *)search {
+    search_ = [search copy];
+}
+
 - (Package *) packageAtIndexPath:(NSIndexPath *)path {
 @synchronized (database_) {
     if ([database_ era] != era_)
@@ -6101,7 +6110,10 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 } }
 
 - (NSArray *) sectionIndexTitlesForTableView:(UITableView *)tableView {
-    return index_;
+    if ([[self class] supportsSearch])
+        return [[NSArray arrayWithObject:UITableViewIndexSearch] arrayByAddingObjectsFromArray:index_];
+    else
+        return index_;
 }
 
 - (UITableViewCell *) tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
@@ -6132,6 +6144,15 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 }
 
 - (NSInteger) tableView:(UITableView *)tableView sectionForSectionIndexTitle:(NSString *)title atIndex:(NSInteger)index {
+    if ([[self class] supportsSearch])
+        if (index == 0) {
+            [tableView setContentOffset:CGPointZero animated:NO];
+            return NSNotFound;
+        } else {
+            return index - 1;
+        }
+    }
+
     return index;
 }
 
@@ -6143,11 +6164,38 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     return [NSMutableArray arrayWithArray:packages];
 } }
 
+- (NSMutableArray *) searchPackages:(NSMutableArray *)packages {
+    if (search_ == nil || [search_ length] == 0) return packages;
+
+    IMP imp = NULL;
+    SEL filter = @selector(isUnfilteredAndSelectedForBy:);
+
+    @synchronized (self) {
+        /* XXX: this is an unsafe optimization of doomy hell */
+        Method method(class_getInstanceMethod([Package class], filter));
+        _assert(method != NULL);
+        imp = method_getImplementation(method);
+        _assert(imp != NULL);
+    }
+
+    for (size_t offset(0), end([packages count]); offset != end; ++offset) {
+        if (!(*reinterpret_cast<bool (*)(id, SEL, id)>(imp))([packages objectAtIndex:offset], filter, search_)) {
+            [packages removeObjectAtIndex:offset];
+
+            --offset;
+            --end;
+        }
+    }
+
+    return packages;
+}
+
 - (void) reloadData {
     NSArray *packages;
 
   reload:
-    packages = [self _reloadPackages];
+    packages = [[self _reloadPackages] mutableCopy];
+    packages = [self searchPackages:packages];
 
 @synchronized (database_) {
     if (era_ != [database_ era])
@@ -6193,7 +6241,10 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 
 @interface PackageListController : CyteViewController <UITableViewDelegate> {
     _transient Database *database_;
+    _H<UISearchDisplayController> searchController_;
+    _H<UISearchBar> searchBar_;
     _H<PackageListDataSource> datasource_;
+    _H<PackageListDataSource> searchDatasource_;
     _H<UITableView, 2> list_;
     _H<NSString> title_;
 }
@@ -6305,21 +6356,29 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 }
 
 - (void) tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)path {
-    Package *package([datasource_ packageAtIndexPath:path]);
+    PackageListDataSource *source = datasource_;
+    if ([searchController_ isActive])
+        source = searchDatasource_;
+
+    Package *package([source packageAtIndexPath:path]);
     package = [database_ packageWithName:[package id]];
     [self didSelectPackage:package];
+}
+
++ (Class) dataSourceClass {
+    return [PackageListDataSource class];
 }
 
 - (id) initWithDatabase:(Database *)database title:(NSString *)title {
     if ((self = [super init]) != nil) {
         database_ = database;
+
+        datasource_ = [[[[[self class] dataSourceClass] alloc] initWithDatabase:database_] autorelease];
+        searchDatasource_ = [[[[[self class] dataSourceClass] alloc] initWithDatabase:database_] autorelease];
+
         title_ = [title copy];
         [[self navigationItem] setTitle:title_];
     } return self;
-}
-
-+ (Class) dataSourceClass {
-    return [PackageListDataSource class];
 }
 
 - (void) loadView {
@@ -6328,8 +6387,6 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     [view setAutoresizingMask:(UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight)];
     [self setView:view];
 
-    datasource_ = [[[[[self class] dataSourceClass] alloc] initWithDatabase:database_] autorelease];
-
     list_ = [[[UITableView alloc] initWithFrame:[[self view] bounds] style:UITableViewStylePlain] autorelease];
     [list_ setAutoresizingMask:UIViewAutoresizingFlexibleBoth];
     [view addSubview:list_];
@@ -6337,14 +6394,35 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     // XXX: is 20 the most optimal number here?
     [list_ setSectionIndexMinimumDisplayRowCount:20];
     [list_ setRowHeight:73];
-
     [(UITableView *) list_ setDataSource:datasource_];
     [list_ setDelegate:self];
+
+    if ([[[self class] dataSourceClass] supportsSearch]) {
+        searchBar_ = [[UISearchBar alloc] init];
+        [searchBar_ sizeToFit];
+        searchController_ = [[UISearchDisplayController alloc] initWithSearchBar:searchBar_ contentsController:self];
+        [searchController_ setDelegate:self];
+        [list_ setTableHeaderView:searchBar_];
+
+        [searchController_ setSearchResultsDataSource:searchDatasource_];
+        [searchController_ setSearchResultsDelegate:self];
+    }
+}
+
+- (BOOL)searchDisplayController:(UISearchDisplayController *)controller shouldReloadTableForSearchString:(NSString *)searchString {
+    [searchDatasource_ setSearch:searchString];
+    [searchDatasource_ reloadData];
+    return YES;
+}
+
+- (void)searchDisplayController:(UISearchDisplayController *)controller willShowSearchResultsTableView:(UITableView *)tableView {
+    // XXX: is 20 the most optimal number here?
+    [tableView setSectionIndexMinimumDisplayRowCount:20];
+    [tableView setRowHeight:73];
 }
 
 - (void) releaseSubviews {
     list_ = nil;
-    datasource_ = nil;
 
     [super releaseSubviews];
 }
@@ -6361,7 +6439,6 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 }
 
 - (void) clearData {
-    datasource_ = nil;
     [list_ setDataSource:nil];
     [list_ reloadData];
 
@@ -6410,8 +6487,6 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 } }
 
 - (NSMutableArray *) _reloadPackages {
-    NSLog(@"reload packages");
-
 @synchronized (database_) {
     era_ = [database_ era];
     NSArray *packages([database_ packages]);
@@ -6428,6 +6503,8 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
         object = object_;
     }
 
+    if (imp == NULL) return filtered;
+
     _profile(PackageTable$reloadData$Filter)
         for (Package *package in packages)
             if ([package valid] && (*reinterpret_cast<bool (*)(id, SEL, id)>(imp))(package, filter, object))
@@ -6435,7 +6512,7 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     _end
 
     return filtered;
-} NSLog(@"done"); }
+} }
 
 @end
 
@@ -6456,6 +6533,7 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 
 - (void) setFilter:(SEL)filter {
     [datasource_ setFilter:filter];
+    [searchDatasource_ setFilter:filter];
 }
 
 - (id) object {
@@ -6464,12 +6542,12 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 
 - (void) setObject:(id)object {
     [datasource_ setObject:object];
+    [searchDatasource_ setObject:object];
 }
 
 - (void)setFilter:(SEL)filter object:(id)object {
-    NSLog(@"set filter: %@ object: %@", NSStringFromSelector(filter), object);
-    [datasource_ setFilter:filter];
-    [datasource_ setObject:object];
+    [self setFilter:filter];
+    [self setObject:object];
 }
 
 @end
@@ -6542,62 +6620,6 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
         target:self
         action:@selector(aboutButtonClicked)
     ] autorelease];
-}
-
-@end
-/* }}} */
-/* Manage Controller {{{ */
-@interface ManageController : CydiaWebViewController {
-}
-
-- (void) queueStatusDidChange;
-
-@end
-
-@implementation ManageController
-
-- (id) init {
-    if ((self = [super init]) != nil) {
-        [self setURL:[NSURL fileURLWithPath:[[NSBundle mainBundle] pathForResource:@"manage" ofType:@"html"]]];
-    } return self;
-}
-
-- (NSURL *) navigationURL {
-    return [NSURL URLWithString:@"cydia://manage"];
-}
-
-- (UIBarButtonItem *) leftButton {
-    return [[[UIBarButtonItem alloc]
-        initWithTitle:UCLocalize("SETTINGS")
-        style:UIBarButtonItemStylePlain
-        target:self
-        action:@selector(settingsButtonClicked)
-    ] autorelease];
-}
-
-- (void) settingsButtonClicked {
-    [delegate_ showSettings];
-}
-
-- (void) queueButtonClicked {
-    [delegate_ queue];
-}
-
-- (UIBarButtonItem *) rightButton {
-    return Queuing_ ? [[[UIBarButtonItem alloc]
-        initWithTitle:UCLocalize("QUEUE")
-        style:UIBarButtonItemStyleDone
-        target:self
-        action:@selector(queueButtonClicked)
-    ] autorelease] : nil;
-}
-
-- (void) queueStatusDidChange {
-    [self applyRightButton];
-}
-
-- (bool) isLoading {
-    return !Queuing_ && [super isLoading];
 }
 
 @end
@@ -7630,6 +7652,10 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
     return upgrades_;
 }
 
++ (BOOL) supportsSearch {
+    return NO;
+}
+
 @end
 
 @interface ChangesPackageListController : PackageListController <
@@ -7794,7 +7820,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 - (void) reloadData {
     [super reloadData];
 
-    [[self navigationItem] setRightBarButtonItem:([datasource_ upgrades] ? nil : [[[UIBarButtonItem alloc]
+    [[self navigationItem] setRightBarButtonItem:([datasource_ upgrades] == 0 ? nil : [[[UIBarButtonItem alloc]
         initWithTitle:[NSString stringWithFormat:UCLocalize("PARENTHETICAL"), UCLocalize("UPGRADE"), [NSString stringWithFormat:@"%u", [datasource_ upgrades]]]
         style:UIBarButtonItemStylePlain
         target:self
@@ -7809,141 +7835,6 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
     ] autorelease]) animated:YES];
 
     PrintTimes();
-}
-
-@end
-/* }}} */
-/* Search Controller {{{ */
-@interface SearchController : FilteredPackageListController <
-    UISearchBarDelegate
-> {
-    _H<UISearchBar, 1> search_;
-    BOOL searchloaded_;
-}
-
-- (id) initWithDatabase:(Database *)database query:(NSString *)query;
-
-@end
-
-@implementation SearchController
-
-- (NSURL *) referrerURL {
-    return [NSURL URLWithString:[NSString stringWithFormat:@"%@/#!/search?q=%@", UI_, [([search_ text] ?: @"") stringByAddingPercentEscapesIncludingReserved]]];
-}
-
-- (NSURL *) navigationURL {
-    if ([search_ text] == nil || [[search_ text] isEqualToString:@""])
-        return [NSURL URLWithString:@"cydia://search"];
-    else
-        return [NSURL URLWithString:[NSString stringWithFormat:@"cydia://search/%@", [[search_ text] stringByAddingPercentEscapesIncludingReserved]]];
-}
-
-- (NSArray *) termsForQuery:(NSString *)query {
-    NSMutableArray *terms([NSMutableArray arrayWithCapacity:2]);
-    for (NSString *component in [query componentsSeparatedByString:@" "])
-        if ([component length] != 0)
-            [terms addObject:component];
-
-    return terms;
-}
-
-- (void) useSearch {
-    [self setFilter:@selector(isUnfilteredAndSearchedForBy:) object:[self termsForQuery:[search_ text]]];
-    [self clearData];
-    [self reloadData];
-}
-
-- (void) searchBarTextDidBeginEditing:(UISearchBar *)searchBar {
-    [self setFilter:@selector(isUnfilteredAndSelectedForBy:) object:[search_ text]];
-    [self clearData];
-    [self reloadData];
-}
-
-- (void) searchBarButtonClicked:(UISearchBar *)searchBar {
-    [search_ resignFirstResponder];
-    [self useSearch];
-}
-
-- (void) searchBarCancelButtonClicked:(UISearchBar *)searchBar {
-    [search_ setText:@""];
-    [self searchBarButtonClicked:searchBar];
-}
-
-- (void) searchBarSearchButtonClicked:(UISearchBar *)searchBar {
-    [self searchBarButtonClicked:searchBar];
-}
-
-- (void) searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)text {
-    [self setFilter:@selector(isUnfilteredAndSelectedForBy:) object:text];
-    [self reloadData];
-}
-
-- (bool) shouldYield {
-    return YES;
-}
-
-- (bool) shouldBlock {
-    return [self filter] == @selector(isUnfilteredAndSearchedForBy:);
-}
-
-/*
-- (NSMutableArray *) _reloadPackages {
-    NSMutableArray *packages([super _reloadPackages]);
-    if ([self filter] == @selector(isUnfilteredAndSearchedForBy:))
-        [packages radixSortUsingSelector:@selector(rank)];
-    return packages;
-}*/
-
-- (id) initWithDatabase:(Database *)database query:(NSString *)query {
-    if ((self = [super initWithDatabase:database title:UCLocalize("SEARCH")])) {
-        [self setFilter:@selector(isUnfilteredAndSearchedForBy:) object:[self termsForQuery:query]];
-
-        search_ = [[[UISearchBar alloc] init] autorelease];
-        [search_ setDelegate:self];
-
-        if (query != nil)
-            [search_ setText:query];
-    } return self;
-}
-
-- (void) viewDidAppear:(BOOL)animated {
-    [super viewDidAppear:animated];
-
-    if (!searchloaded_) {
-        searchloaded_ = YES;
-        [search_ setFrame:CGRectMake(0, 0, [[self view] bounds].size.width, 44.0f)];
-        [search_ layoutSubviews];
-        [search_ setPlaceholder:UCLocalize("SEARCH_EX")];
-
-        UITextField *textField;
-        if ([search_ respondsToSelector:@selector(searchField)])
-            textField = [search_ searchField];
-        else
-            textField = MSHookIvar<UITextField *>(search_, "_searchField");
-
-        [textField setAutoresizingMask:UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin];
-        [textField setEnablesReturnKeyAutomatically:NO];
-        [[self navigationItem] setTitleView:textField];
-    }
-
-    if ([self isSummarized])
-        [search_ becomeFirstResponder];
-}
-
-- (void) reloadData {
-    id object([search_ text]);
-    if ([self filter] == @selector(isUnfilteredAndSearchedForBy:))
-        object = [self termsForQuery:object];
-
-    [self setObject:object];
-    [self resetScrollPosition];
-
-    [super reloadData];
-}
-
-- (void) didSelectPackage:(Package *)package {
-    [search_ resignFirstResponder];
-    [super didSelectPackage:package];
 }
 
 @end
@@ -8162,17 +8053,15 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 
 - (void) queueStatusDidChange {
 #if !AlwaysReload
-    if (IsWildcat_) {
-        if (Queuing_) {
-            [[self navigationItem] setLeftBarButtonItem:[[[UIBarButtonItem alloc]
-                initWithTitle:UCLocalize("QUEUE")
-                style:UIBarButtonItemStyleDone
-                target:self
-                action:@selector(queueButtonClicked)
-            ] autorelease]];
-        } else {
-            [[self navigationItem] setLeftBarButtonItem:nil];
-        }
+    if (Queuing_) {
+        [[self navigationItem] setLeftBarButtonItem:[[[UIBarButtonItem alloc]
+            initWithTitle:UCLocalize("QUEUE")
+            style:UIBarButtonItemStyleDone
+            target:self
+            action:@selector(queueButtonClicked)
+        ] autorelease]];
+    } else {
+        [[self navigationItem] setLeftBarButtonItem:nil];
     }
 #endif
 }
@@ -8776,13 +8665,14 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
         action:@selector(editButtonClicked)
     ] autorelease] animated:animated];
 
-    if (IsWildcat_ && !editing)
+    if (!editing) {
         [[self navigationItem] setLeftBarButtonItem:[[[UIBarButtonItem alloc]
             initWithTitle:UCLocalize("SETTINGS")
             style:UIBarButtonItemStylePlain
             target:self
             action:@selector(settingsButtonClicked)
         ] autorelease]];
+    }
 }
 
 - (void) settingsButtonClicked {
@@ -9713,10 +9603,6 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
         NSString *destination = [[url absoluteString] substringFromIndex:([scheme length] + [@"://" length] + [base length] + [@"/" length])];
         controller = [[[CydiaWebViewController alloc] initWithURL:[NSURL URLWithString:destination]] autorelease];
     } else if (!external && [components count] == 1) {
-        if ([base isEqualToString:@"manage"]) {
-            controller = [[[ManageController alloc] init] autorelease];
-        }
-
         if ([base isEqualToString:@"storage"]) {
             controller = [[[CydiaWebViewController alloc] initWithURL:[NSURL URLWithString:[NSString stringWithFormat:@"%@/storage/", UI_]]] autorelease];
         }
@@ -9733,10 +9619,6 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
             controller = [[[SectionsController alloc] initWithDatabase:database_] autorelease];
         }
 
-        if ([base isEqualToString:@"search"]) {
-            controller = [[[SearchController alloc] initWithDatabase:database_ query:nil] autorelease];
-        }
-
         if ([base isEqualToString:@"changes"]) {
             controller = [[[ChangesPackageListController alloc] initWithDatabase:database_] autorelease];
         }
@@ -9749,10 +9631,6 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 
         if ([base isEqualToString:@"package"]) {
             controller = [self pageForPackage:argument withReferrer:referrer];
-        }
-
-        if (!external && [base isEqualToString:@"search"]) {
-            controller = [[[SearchController alloc] initWithDatabase:database_ query:[argument stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding]] autorelease];
         }
 
         if (!external && [base isEqualToString:@"sections"]) {
@@ -9901,15 +9779,9 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
         [[[UITabBarItem alloc] initWithTitle:@"Cydia" image:[UIImage applicationImageNamed:@"home.png"] tag:0] autorelease],
         [[[UITabBarItem alloc] initWithTitle:UCLocalize("SECTIONS") image:[UIImage applicationImageNamed:@"install.png"] tag:0] autorelease],
         [[[UITabBarItem alloc] initWithTitle:(AprilFools_ ? @"Timeline" : UCLocalize("CHANGES")) image:[UIImage applicationImageNamed:@"changes.png"] tag:0] autorelease],
-        [[[UITabBarItem alloc] initWithTitle:UCLocalize("SEARCH") image:[UIImage applicationImageNamed:@"search.png"] tag:0] autorelease],
+        [[[UITabBarItem alloc] initWithTitle:UCLocalize("INSTALLED") image:[UIImage applicationImageNamed:@"manage.png"] tag:0] autorelease],
+        [[[UITabBarItem alloc] initWithTitle:UCLocalize("SOURCES") image:[UIImage applicationImageNamed:@"source.png"] tag:0] autorelease],
     nil]);
-
-    if (IsWildcat_) {
-        [items insertObject:[[[UITabBarItem alloc] initWithTitle:UCLocalize("SOURCES") image:[UIImage applicationImageNamed:@"source.png"] tag:0] autorelease] atIndex:3];
-        [items insertObject:[[[UITabBarItem alloc] initWithTitle:UCLocalize("INSTALLED") image:[UIImage applicationImageNamed:@"manage.png"] tag:0] autorelease] atIndex:3];
-    } else {
-        [items insertObject:[[[UITabBarItem alloc] initWithTitle:UCLocalize("MANAGE") image:[UIImage applicationImageNamed:@"manage.png"] tag:0] autorelease] atIndex:3];
-    }
 
     NSMutableArray *controllers([NSMutableArray array]);
     for (UITabBarItem *item in items) {
@@ -10036,13 +9908,8 @@ _trace();
     [standard addObject:[NSArray arrayWithObject:@"cydia://home"]];
     [standard addObject:[NSArray arrayWithObject:@"cydia://sections"]];
     [standard addObject:[NSArray arrayWithObject:@"cydia://changes"]];
-    if (!IsWildcat_) {
-        [standard addObject:[NSArray arrayWithObject:@"cydia://manage"]];
-    } else {
-        [standard addObject:[NSArray arrayWithObject:@"cydia://installed"]];
-        [standard addObject:[NSArray arrayWithObject:@"cydia://sources"]];
-    }
-    [standard addObject:[NSArray arrayWithObject:@"cydia://search"]];
+    [standard addObject:[NSArray arrayWithObject:@"cydia://installed"]];
+    [standard addObject:[NSArray arrayWithObject:@"cydia://sources"]];
     return standard;
 }
 
