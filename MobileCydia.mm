@@ -5718,15 +5718,24 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 @end
 /* }}} */
 /* Section Cell {{{ */
+@protocol SectionsCellDelegate
+
+- (void) reloadData;
+- (NSArray *) allSections;
+
+@end
+
 @interface SectionCell : CyteTableViewCell <
     CyteTableViewCellDelegate
 > {
     _H<NSString> basic_;
+    _H<NSString> base_;
     _H<NSString> section_;
     _H<NSString> name_;
     _H<NSString> count_;
     _H<UIImage> icon_;
     _H<UISwitch> switch_;
+    _transient id<SectionsCellDelegate> delegate_;
     float indent_;
     BOOL editing_;
 }
@@ -5736,6 +5745,10 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 @end
 
 @implementation SectionCell
+
+- (void) setDelegate:(id<SectionsCellDelegate>)delegate {
+    delegate_ = delegate;
+}
 
 - (id) initWithFrame:(CGRect)frame reuseIdentifier:(NSString *)reuseIdentifier {
     if ((self = [super initWithFrame:frame reuseIdentifier:reuseIdentifier]) != nil) {
@@ -5755,15 +5768,40 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     } return self;
 }
 
-- (void) onSwitch:(id)sender {
-    NSMutableDictionary *metadata([Sections_ objectForKey:basic_]);
+- (void) _setVisibleState:(BOOL)visible forSection:(NSString *)basic {
+    NSMutableDictionary *metadata([Sections_ objectForKey:basic]);
     if (metadata == nil) {
         metadata = [NSMutableDictionary dictionaryWithCapacity:2];
-        [Sections_ setObject:metadata forKey:basic_];
+        [Sections_ setObject:metadata forKey:basic];
     }
 
-    [metadata setObject:[NSNumber numberWithBool:([switch_ isOn] == NO)] forKey:@"Hidden"];
+    [metadata setObject:[NSNumber numberWithBool:(visible == NO)] forKey:@"Hidden"];
     Changed_ = true;
+}
+
+// This method really belongs somewhere else, but the whole sections mechanism is broken and needs something to
+// encapsulate it *extremely* badly. :( Anyone up for writing something to make it slightly more sane?
+- (void) onSwitch:(id)sender {
+    [self _setVisibleState:[switch_ isOn] forSection:basic_];
+
+    for (Section *section in [delegate_ allSections]) {
+        NSString *basic = [section name];
+
+        static Pcre title_r("^(.*?) \\((.*)\\)$");
+        if (title_r(basic)) {
+            // If you turn off or on a top-level section, do the same to all its subsections.
+            if (base_ == nil && [section_ isEqual:title_r[1]]) {
+                [self _setVisibleState:[switch_ isOn] forSection:basic];
+            }
+        } else {
+            // If you turn on a subsection, make sure it's top-level section is on.
+            if ([switch_ isOn] && base_ != nil && [base_ isEqual:basic]) {
+                [self _setVisibleState:YES forSection:basic];
+            }
+        }
+    }
+
+    [delegate_ reloadData];
 }
 
 - (void) setSection:(Section *)section editing:(BOOL)editing {
@@ -5791,9 +5829,11 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 
         static Pcre title_r("^(.*?) \\((.*)\\)$");
         if (title_r(basic_)) {
+            base_ = [title_r[1] retain];
             section_ = [LocalizeSection(title_r[2]) retain];
             indent_ = 28;
         } else {
+            base_ = nil;
             section_ = [section localized];
             if (section_ != nil)
                 section_ = [section_ retain];
@@ -7476,6 +7516,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 /* }}} */
 /* Sections Controller {{{ */
 @interface SectionsController : CyteViewController <
+    SectionsCellDelegate,
     UITableViewDataSource,
     UITableViewDelegate
 > {
@@ -7554,6 +7595,10 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
     return 45.0f;
 }*/
 
+- (NSArray *) allSections {
+    return sections_;
+}
+
 - (UITableViewCell *) tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     static NSString *reuseIdentifier = @"SectionCell";
 
@@ -7562,6 +7607,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
         cell = [[[SectionCell alloc] initWithFrame:CGRectZero reuseIdentifier:reuseIdentifier] autorelease];
 
     [cell setSection:[self sectionAtIndexPath:indexPath] editing:[self isEditing]];
+    [cell setDelegate:self];
 
     return cell;
 }
