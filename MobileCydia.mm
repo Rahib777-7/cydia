@@ -771,39 +771,6 @@ static _finline const char *StripVersion_(const char *version) {
     return colon == NULL ? version : colon + 1;
 }
 
-NSString *LocalizeSection(NSString *section) {
-    static Pcre title_r("^(.*?) \\((.*)\\)$");
-    if (title_r(section)) {
-        NSString *parent(title_r[1]);
-        NSString *child(title_r[2]);
-
-        return [NSString stringWithFormat:UCLocalize("PARENTHETICAL"),
-            LocalizeSection(parent),
-            LocalizeSection(child)
-        ];
-    }
-
-    return [[NSBundle mainBundle] localizedStringForKey:section value:nil table:@"Sections"];
-}
-
-NSString *Simplify(NSString *title) {
-    const char *data = [title UTF8String];
-    size_t size = [title length];
-
-    static Pcre square_r("^\\[(.*)\\]$");
-    if (square_r(data, size))
-        return Simplify(square_r[1]);
-
-    static Pcre paren_r("^\\((.*)\\)$");
-    if (paren_r(data, size))
-        return Simplify(paren_r[1]);
-
-    static Pcre title_r("^(.*?) \\((.*)\\)$");
-    if (title_r(data, size))
-        return Simplify(title_r[1]);
-
-    return title;
-}
 /* }}} */
 
 NSString *GetLastUpdate() {
@@ -818,12 +785,6 @@ NSString *GetLastUpdate() {
     CFRelease(formatter);
 
     return [(NSString *) formatted autorelease];
-}
-
-bool isSectionVisible(NSString *section) {
-    NSDictionary *metadata([Sections_ objectForKey:(section ?: @"")]);
-    NSNumber *hidden(metadata == nil ? nil : [metadata objectForKey:@"Hidden"]);
-    return hidden == nil || ![hidden boolValue];
 }
 
 static NSObject *CYIOGetValue(const char *path, NSString *property) {
@@ -859,6 +820,7 @@ static NSString *CYHex(NSData *data, bool reverse = false) {
 /* Delegate Prototypes {{{ */
 @class Package;
 @class Source;
+@class Section;
 @class CydiaProgressEvent;
 
 @protocol DatabaseDelegate
@@ -1025,7 +987,7 @@ typedef std::map< unsigned long, _H<Source> > SourceMap;
     int statusfd_;
     FILE *input_;
 
-    std::map<const char *, _H<NSString> > sections_;
+    std::map<const char *, _H<Section> > sections_;
 }
 
 + (Database *) sharedInstance;
@@ -1050,6 +1012,12 @@ typedef std::map< unsigned long, _H<Source> > SourceMap;
 - (Source *) sourceWithKey:(NSString *)key;
 - (void) reloadDataWithInvocation:(NSInvocation *)invocation;
 
+- (void) updateSectionCounts;
+- (NSArray *) allSections;
+- (NSArray *) rootSections;
+- (Section *) sectionWithName:(NSString *)name; // this is slow
+- (Section *) mappedSectionForPointer:(const char *)pointer;
+
 - (void) configure;
 - (bool) prepare;
 - (void) perform;
@@ -1064,8 +1032,6 @@ typedef std::map< unsigned long, _H<Source> > SourceMap;
 - (NSObject<ProgressDelegate> *) progressDelegate;
 
 - (Source *) getSource:(pkgCache::PkgFileIterator)file;
-
-- (NSString *) mappedSectionForPointer:(const char *)pointer;
 
 @end
 /* }}} */
@@ -1840,6 +1806,184 @@ static void PackageImport(const void *key, const void *value, void *context) {
 
 @end
 /* }}} */
+/* Section Class {{{ */
+@interface Section : NSObject {
+    _transient Database *database_;
+
+    _H<NSString> name_; // Themes (SpringBoard)
+    _H<NSString> simplified_; // SpringBoard
+    _H<NSString> localized_; // Trampolín (via Google Translate ;P)
+    _H<NSString> base_; // Themes
+
+    NSUInteger count_;
+    BOOL visible_;
+
+    _transient Section *parent_; // Themes
+    _H<NSMutableArray> subsections_;
+}
+
+@property (nonatomic, readonly) NSString *name;
+@property (nonatomic, readonly) NSString *simplified;
+@property (nonatomic, readonly) NSString *localized;
+@property (nonatomic, readonly) NSString *base;
+
+@property (nonatomic, assign) BOOL visible;
+
+@property (nonatomic, assign) NSUInteger count;
+- (void) addToCount;
+
+@property (nonatomic, assign) Section *parent;
+@property (nonatomic, retain) NSArray *subsections;
+- (void) addSubsection:(Section *)subsection;
+
+@end
+
+@implementation Section
+@synthesize count=count_, visible=visible_;
+
+- (NSString *) name {
+    return name_;
+}
+
+- (NSString *) simplified {
+    return simplified_;
+}
+
+- (NSString *) localized {
+    return localized_;
+}
+
+- (NSString *) base {
+    return base_;
+}
+
+- (Section *) parent {
+    return parent_;
+}
+
+- (void) setParent:(Section *)parent {
+    parent_ = parent;
+}
+
+- (NSArray *) subsections {
+    return subsections_;
+}
+
+- (void) setSubsections:(NSArray *)subsections {
+    subsections_ = [[subsections mutableCopy] autorelease];
+}
+
+- (void) addSubsection:(Section *)subsection {
+    [subsections_ addObject:subsection];
+}
+
++ (NSString *) simplifyName:(NSString *)title {
+    const char *data = [title UTF8String];
+    size_t size = [title length];
+
+    static Pcre square_r("^\\[(.*)\\]$");
+    if (square_r(data, size))
+        return [self simplifyName:square_r[1]];
+
+    static Pcre paren_r("^\\((.*)\\)$");
+    if (paren_r(data, size))
+        return [self simplifyName:paren_r[1]];
+
+    return title;
+}
+
++ (NSString *) localizeName:(NSString *)section {
+    return [[NSBundle mainBundle] localizedStringForKey:section value:nil table:@"Sections"];
+}
+
+- (NSComparisonResult) compareByLocalized:(Section *)section {
+    NSString *lhs(localized_);
+    NSString *rhs([section localized]);
+
+    /*if ([lhs length] != 0 && [rhs length] != 0) {
+        unichar lhc = [lhs characterAtIndex:0];
+        unichar rhc = [rhs characterAtIndex:0];
+
+        if (isalpha(lhc) && !isalpha(rhc))
+            return NSOrderedAscending;
+        else if (!isalpha(lhc) && isalpha(rhc))
+            return NSOrderedDescending;
+    }*/
+
+    return [lhs compare:rhs options:LaxCompareOptions_];
+}
+
+- (id) initWithName:(NSString *)name database:(Database *)database {
+    if ((self = [super init])) {
+        database_ = database;
+
+        subsections_ = [NSMutableArray array];
+
+        if (name != nil) {
+            name_ = name;
+
+            static Pcre name_r("^(.*?) \\((.*)\\)$");
+            if (name_r([name UTF8String], [name length])) {
+                base_ = name_r[1];
+                name = name_r[2];
+            }
+
+            simplified_ = [[self class] simplifyName:name];
+            localized_ = [[self class] localizeName:simplified_];
+
+            NSDictionary *metadata([Sections_ objectForKey:(name ?: @"")]);
+            NSNumber *hidden(metadata == nil ? nil : [metadata objectForKey:@"Hidden"]);
+            visible_ = hidden == nil || ![hidden boolValue];
+        } else {
+            name_ = simplified_ = @"No Section";
+            localized_ = UCLocalize("NO_SECTION");
+            visible_ = YES;
+        }
+    } return self;
+}
+
+// The skipRelated parameter is to protect against cycles when performing
+// subsection and parent related changes.
+- (void) setVisible:(BOOL)visible skipRelated:(Section *)related {
+    visible_ = visible;
+
+    NSMutableDictionary *metadata([Sections_ objectForKey:name_]);
+    if (metadata == nil) {
+        metadata = [NSMutableDictionary dictionaryWithCapacity:2];
+        [Sections_ setObject:metadata forKey:name_];
+    }
+
+    [metadata setObject:[NSNumber numberWithBool:(visible_ == NO)] forKey:@"Hidden"];
+    Changed_ = true;
+
+    if (parent_ == nil) {
+        // If you turn off a top-level section, do the same to all its subsections.
+        if (!visible_) {
+            for (Section *section in (id) subsections_) {
+                if (section != related)
+                    [section setVisible:visible_ skipRelated:self];
+            }
+        }
+    } else {
+        // If you turn on a subsection, make sure its top-level section is on.
+        if (visible_) {
+            if (parent_ != related)
+                [parent_ setVisible:visible_ skipRelated:self];
+        }
+    }
+}
+
+- (void) setVisible:(BOOL)visible {
+    [self setVisible:visible skipRelated:nil];
+}
+
+- (void) addToCount {
+    count_ += 1;
+}
+
+@end
+
+/* }}} */
 /* Package Class {{{ */
 struct ParsedPackage {
     CYString md5sum_;
@@ -1882,9 +2026,7 @@ struct ParsedPackage {
     CYString latest_;
     CYString installed_;
 
-    const char *section_;
-    _transient NSString *section$_;
-
+    _H<Section> section_;
     _H<Source> source_;
 
     PackageValue *metadata_;
@@ -1899,11 +2041,7 @@ struct ParsedPackage {
 - (pkgCache::PkgIterator) iterator;
 - (void) parse;
 
-- (NSString *) section;
-- (NSString *) simpleSection;
-
-- (NSString *) longSection;
-- (NSString *) shortSection;
+- (Section *) section;
 
 - (NSString *) uri;
 
@@ -1974,7 +2112,7 @@ struct ParsedPackage {
 - (bool) isUnfilteredAndSearchedForBy:(NSArray *)query;
 - (bool) isUnfilteredAndSelectedForBy:(NSString *)search;
 - (bool) isInstalledAndUnfiltered:(NSNumber *)number;
-- (bool) isVisibleInSection:(NSString *)section;
+- (bool) isVisibleInSection:(Section *)section;
 - (bool) isVisibleInSource:(Source *)source;
 
 @end
@@ -2151,7 +2289,6 @@ struct PackageNameOrdering :
         @"installed",
         @"latest",
         @"longDescription",
-        @"longSection",
         @"maintainer",
         @"md5sum",
         @"mode",
@@ -2161,8 +2298,6 @@ struct PackageNameOrdering :
         @"section",
         @"selection",
         @"shortDescription",
-        @"shortSection",
-        @"simpleSection",
         @"size",
         @"source",
         @"sponsor",
@@ -2381,13 +2516,13 @@ struct PackageNameOrdering :
                 metadata->last_ = metadata->first_;
         _end
 
-        _profile(Package$initWithVersion$Section)
-            section_ = version_.Section();
-        _end
-
         _profile(Package$initWithVersion$Flags)
             essential_ |= ((iterator->Flags & pkgCache::Flag::Essential) == 0 ? NO : YES);
             ignored_ = iterator->SelectedState == pkgCache::State::Hold;
+        _end
+
+        _profile(Package$initWithVersion$Section)
+            section_ = [database_ mappedSectionForPointer:version_.Section()];
         _end
     _end } return self;
 }
@@ -2428,30 +2563,8 @@ struct PackageNameOrdering :
     return iterator_;
 }
 
-- (NSString *) section {
-    if (section$_ == nil) {
-        if (section_ == NULL)
-            return nil;
-
-        _profile(Package$section$mappedSectionForPointer)
-            section$_ = [database_ mappedSectionForPointer:section_];
-        _end
-    } return section$_;
-}
-
-- (NSString *) simpleSection {
-    if (NSString *section = [self section])
-        return Simplify(section);
-    else
-        return nil;
-}
-
-- (NSString *) longSection {
-    return LocalizeSection([self section]);
-}
-
-- (NSString *) shortSection {
-    return [[NSBundle mainBundle] localizedStringForKey:[self simpleSection] value:nil table:@"Sections"];
+- (Section *) section {
+    return section_;
 }
 
 - (NSString *) uri {
@@ -2625,18 +2738,7 @@ struct PackageNameOrdering :
     if (![self unfiltered])
         return false;
 
-    NSString *section;
-
-    _profile(Package$visible$section)
-        section = [self section];
-    _end
-
-    _profile(Package$visible$isSectionVisible)
-        if (!isSectionVisible(section))
-            return false;
-    _end
-
-    return true;
+    return [[self section] visible];
 }
 
 - (BOOL) half {
@@ -2708,7 +2810,7 @@ struct PackageNameOrdering :
 }
 
 - (UIImage *) icon {
-    NSString *section = [self simpleSection];
+    NSString *section = [[self section] name];
 
     UIImage *icon(nil);
     if (parsed_ != NULL)
@@ -2831,7 +2933,7 @@ struct PackageNameOrdering :
         bool _private = false;
         bool stash = false;
 
-        bool repository = [[self section] isEqualToString:@"Repositories"];
+        bool repository = [[[self section] name] isEqualToString:@"Repositories"];
 
         if (NSArray *files = [self files])
             for (NSString *file in files)
@@ -3008,9 +3110,9 @@ struct PackageNameOrdering :
 }
 
 - (uint32_t) compareBySection:(NSArray *)sections {
-    NSString *section([self section]);
+    Section *section([self section]);
     for (size_t i(0), e([sections count]); i != e; ++i) {
-        if ([section isEqualToString:[[sections objectAtIndex:i] name]])
+        if ([[section name] isEqualToString:[[sections objectAtIndex:i] name]])
             return i;
     }
 
@@ -3093,13 +3195,11 @@ struct PackageNameOrdering :
     return ![self uninstalled] && (![number boolValue] && role_ != 7 || [self unfiltered]);
 }
 
-- (bool) isVisibleInSection:(NSString *)name {
-    NSString *section([self section]);
-
+- (bool) isVisibleInSection:(Section *)section {
     return (
-        name == nil ||
-        section == nil && [name length] == 0 ||
-        [name isEqualToString:section]
+        section == nil ||
+        [self section] == nil && [[section name] length] == 0 ||
+        [[section name] isEqualToString:[[self section] name]]
     ) && [self visible];
 }
 
@@ -3109,8 +3209,10 @@ struct PackageNameOrdering :
 
 @end
 /* }}} */
-/* Section Class {{{ */
-@interface Section : NSObject {
+
+
+/* Table Section Class {{{ */
+@interface TableSection : NSObject {
     _H<NSString> name_;
     unichar index_;
     size_t row_;
@@ -3118,11 +3220,11 @@ struct PackageNameOrdering :
     _H<NSString> localized_;
 }
 
-- (NSComparisonResult) compareByLocalized:(Section *)section;
-- (Section *) initWithName:(NSString *)name localized:(NSString *)localized;
-- (Section *) initWithName:(NSString *)name localize:(BOOL)localize;
-- (Section *) initWithName:(NSString *)name row:(size_t)row localize:(BOOL)localize;
-- (Section *) initWithIndex:(unichar)index row:(size_t)row;
+- (NSComparisonResult) compareByLocalized:(TableSection *)section;
+- (TableSection *) initWithName:(NSString *)name localized:(NSString *)localized;
+- (TableSection *) initWithName:(NSString *)name;
+- (TableSection *) initWithName:(NSString *)name row:(size_t)row;
+- (TableSection *) initWithIndex:(unichar)index row:(size_t)row;
 - (NSString *) name;
 - (unichar) index;
 
@@ -3137,9 +3239,9 @@ struct PackageNameOrdering :
 
 @end
 
-@implementation Section
+@implementation TableSection
 
-- (NSComparisonResult) compareByLocalized:(Section *)section {
+- (NSComparisonResult) compareByLocalized:(TableSection *)section {
     NSString *lhs(localized_);
     NSString *rhs([section localized]);
 
@@ -3156,29 +3258,27 @@ struct PackageNameOrdering :
     return [lhs compare:rhs options:LaxCompareOptions_];
 }
 
-- (Section *) initWithName:(NSString *)name localized:(NSString *)localized {
-    if ((self = [self initWithName:name localize:NO]) != nil) {
+- (TableSection *) initWithName:(NSString *)name localized:(NSString *)localized {
+    if ((self = [self initWithName:name]) != nil) {
         if (localized != nil)
             localized_ = localized;
     } return self;
 }
 
-- (Section *) initWithName:(NSString *)name localize:(BOOL)localize {
-    return [self initWithName:name row:0 localize:localize];
-}
-
-- (Section *) initWithName:(NSString *)name row:(size_t)row localize:(BOOL)localize {
+- (TableSection *) initWithName:(NSString *)name row:(size_t)row {
     if ((self = [super init]) != nil) {
         name_ = name;
         index_ = '\0';
         row_ = row;
-        if (localize)
-            localized_ = LocalizeSection(name_);
     } return self;
 }
 
+- (TableSection *) initWithName:(NSString *)name {
+    return [self initWithName:name row:0];
+}
+
 /* XXX: localize the index thingees */
-- (Section *) initWithIndex:(unichar)index row:(size_t)row {
+- (TableSection *) initWithIndex:(unichar)index row:(size_t)row {
     if ((self = [super init]) != nil) {
         name_ = [NSString stringWithCharacters:&index length:1];
         index_ = index;
@@ -3516,6 +3616,8 @@ class CydiaLogCleaner :
     sourceMap_.clear();
     [sourceList_ removeAllObjects];
 
+    sections_.clear();
+
     _error->Discard();
 
     delete list_;
@@ -3684,8 +3786,105 @@ class CydiaLogCleaner :
             [(Package *) CFArrayGetValueAtIndex(packages_, index) setIndex:index];
 
         _trace();
+
+        for (std::map<const char *, _H<Section> >::iterator iter = sections_.begin(); iter != sections_.end(); iter++) {
+            Section *section = iter->second;
+
+            Section *parent = [self sectionWithName:[section base]];
+
+            if (parent != nil) {
+                [section setParent:parent];
+                [parent addSubsection:section];
+            }
+        }
+
+        _trace();
     }
 } }
+
+- (NSArray *) allSections {
+    NSMutableArray *sections = [NSMutableArray array];
+
+    for (std::map<const char *, _H<Section> >::iterator iter = sections_.begin(); iter != sections_.end(); iter++) {
+        Section *section = iter->second;
+        [sections addObject:section];
+    }
+
+    return sections;
+}
+
+- (NSArray *) rootSections {
+    NSMutableArray *sections = [NSMutableArray array];
+
+    for (std::map<const char *, _H<Section> >::iterator iter = sections_.begin(); iter != sections_.end(); iter++) {
+        Section *section = iter->second;
+        if ([section parent] == nil)
+            [sections addObject:section];
+    }
+
+    return sections;
+}
+
+- (Section *) sectionWithName:(NSString *)name {
+    if (name == nil) return nil;
+
+    for (std::map<const char *, _H<Section> >::iterator iter = sections_.begin(); iter != sections_.end(); iter++) {
+        Section *section = iter->second;
+
+        if ([[section name] isEqualToString:name])
+            return section;
+    }
+
+    return nil;
+}
+
+- (Section *) mappedSectionForPointer:(const char *)name {
+    if (sections_.find(name) != sections_.end()) {
+        return sections_[name];
+    } else {
+        size_t length(strlen(name));
+        char spaced[length + 1];
+
+        _profile(Database$mappedSectionForPointer$Replace)
+            for (size_t index(0); index != length; ++index)
+                spaced[index] = name[index] == '_' ? ' ' : name[index];
+            spaced[length] = '\0';
+        _end
+
+        NSString *string;
+
+        _profile(Database$mappedSectionForPointer$stringWithUTF8String)
+            string = [NSString stringWithUTF8String:spaced];
+        _end
+
+        _profile(Database$mappedSectionForPointer$Map)
+            string = [SectionMap_ objectForKey:string] ?: string;
+        _end
+
+        Section *section = [self sectionWithName:string];
+
+        if (section == nil) {
+            section = [[Section alloc] initWithName:string database:self];
+            sections_[name] = section;
+        }
+
+        return section;
+    }
+}
+
+- (void) updateSectionCounts {
+    for (std::map<const char *, _H<Section> >::iterator iter = sections_.begin(); iter != sections_.end(); iter++) {
+        Section *section = iter->second;
+        [section setCount:0];
+    }
+
+    for (Package *package in (id) packages_) {
+        Section *section = [package section];
+
+        if ([package valid] && [package unfiltered])
+            [section addToCount];
+    }
+}
 
 - (void) clear {
 @synchronized (self) {
@@ -3883,37 +4082,6 @@ class CydiaLogCleaner :
 - (Source *) getSource:(pkgCache::PkgFileIterator)file {
     SourceMap::const_iterator i(sourceMap_.find(file->ID));
     return i == sourceMap_.end() ? nil : i->second;
-}
-
-- (NSString *) mappedSectionForPointer:(const char *)section {
-    _H<NSString> *mapped;
-
-    _profile(Database$mappedSectionForPointer$Cache)
-        mapped = &sections_[section];
-    _end
-
-    if (*mapped == NULL) {
-        size_t length(strlen(section));
-        char spaced[length + 1];
-
-        _profile(Database$mappedSectionForPointer$Replace)
-            for (size_t index(0); index != length; ++index)
-                spaced[index] = section[index] == '_' ? ' ' : section[index];
-            spaced[length] = '\0';
-        _end
-
-        NSString *string;
-
-        _profile(Database$mappedSectionForPointer$stringWithUTF8String)
-            string = [NSString stringWithUTF8String:spaced];
-        _end
-
-        _profile(Database$mappedSectionForPointer$Map)
-            string = [SectionMap_ objectForKey:string] ?: string;
-        _end
-
-        *mapped = string;
-    } return *mapped;
 }
 
 @end
@@ -5573,10 +5741,15 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 
         NSString *from(label);
 
-        NSString *section = [package simpleSection];
-        if (section != nil && ![section isEqualToString:label]) {
-            section = [[NSBundle mainBundle] localizedStringForKey:section value:nil table:@"Sections"];
-            from = [NSString stringWithFormat:UCLocalize("PARENTHETICAL"), from, section];
+        Section *section = [package section];
+        NSString *sectionLabel = nil;
+        if ([section parent] != nil)
+            sectionLabel = [NSString stringWithFormat:UCLocalize("COLON_DELIMITED"), [section base], [section localized]];
+        else
+            sectionLabel = [section localized];
+
+        if (sectionLabel != nil && ![sectionLabel isEqualToString:label]) {
+            from = [NSString stringWithFormat:UCLocalize("PARENTHETICAL"), from, sectionLabel];
         }
 
         source_ = [NSString stringWithFormat:UCLocalize("FROM"), from];
@@ -5718,37 +5891,34 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 @end
 /* }}} */
 /* Section Cell {{{ */
-@protocol SectionsCellDelegate
+@class SectionCell;
 
-- (void) reloadData;
-- (NSArray *) allSections;
+@protocol SectionCellDelegate <NSObject>
+
+- (void)sectionCellDidChangeVisibleState:(SectionCell *)cell;
 
 @end
 
 @interface SectionCell : CyteTableViewCell <
     CyteTableViewCellDelegate
 > {
-    _H<NSString> basic_;
-    _H<NSString> base_;
-    _H<NSString> section_;
-    _H<NSString> name_;
-    _H<NSString> count_;
+    _H<Section> section_;
+
     _H<UIImage> icon_;
     _H<UISwitch> switch_;
-    _transient id<SectionsCellDelegate> delegate_;
-    float indent_;
+
     BOOL editing_;
+    id<SectionCellDelegate> delegate_;
 }
+
+@property (nonatomic, assign) id<SectionCellDelegate> delegate;
 
 - (void) setSection:(Section *)section editing:(BOOL)editing;
 
 @end
 
 @implementation SectionCell
-
-- (void) setDelegate:(id<SectionsCellDelegate>)delegate {
-    delegate_ = delegate;
-}
+@synthesize delegate=delegate_;
 
 - (id) initWithFrame:(CGRect)frame reuseIdentifier:(NSString *)reuseIdentifier {
     if ((self = [super initWithFrame:frame reuseIdentifier:reuseIdentifier]) != nil) {
@@ -5768,40 +5938,9 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     } return self;
 }
 
-- (void) _setVisibleState:(BOOL)visible forSection:(NSString *)basic {
-    NSMutableDictionary *metadata([Sections_ objectForKey:basic]);
-    if (metadata == nil) {
-        metadata = [NSMutableDictionary dictionaryWithCapacity:2];
-        [Sections_ setObject:metadata forKey:basic];
-    }
-
-    [metadata setObject:[NSNumber numberWithBool:(visible == NO)] forKey:@"Hidden"];
-    Changed_ = true;
-}
-
-// This method really belongs somewhere else, but the whole sections mechanism is broken and needs something to
-// encapsulate it *extremely* badly. :( Anyone up for writing something to make it slightly more sane?
 - (void) onSwitch:(id)sender {
-    [self _setVisibleState:[switch_ isOn] forSection:basic_];
-
-    for (Section *section in [delegate_ allSections]) {
-        NSString *basic = [section name];
-
-        static Pcre title_r("^(.*?) \\((.*)\\)$");
-        if (title_r(basic)) {
-            // If you turn off or on a top-level section, do the same to all its subsections.
-            if (base_ == nil && [section_ isEqual:title_r[1]]) {
-                [self _setVisibleState:[switch_ isOn] forSection:basic];
-            }
-        } else {
-            // If you turn on a subsection, make sure it's top-level section is on.
-            if ([switch_ isOn] && base_ != nil && [base_ isEqual:basic]) {
-                [self _setVisibleState:YES forSection:basic];
-            }
-        }
-    }
-
-    [delegate_ reloadData];
+    [section_ setVisible:[switch_ isOn]];
+    [delegate_ sectionCellDidChangeVisibleState:self];
 }
 
 - (void) setSection:(Section *)section editing:(BOOL)editing {
@@ -5813,39 +5952,9 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
         editing_ = editing;
     }
 
-    basic_ = nil;
-    section_ = nil;
-    name_ = nil;
-    count_ = nil;
+    section_ = section;
 
-    if (section == nil) {
-        name_ = UCLocalize("ALL_PACKAGES");
-        count_ = nil;
-        indent_ = 8;
-    } else {
-        basic_ = [section name];
-        if (basic_ != nil)
-            basic_ = [basic_ retain];
-
-        static Pcre title_r("^(.*?) \\((.*)\\)$");
-        if (title_r(basic_)) {
-            base_ = [title_r[1] retain];
-            section_ = [LocalizeSection(title_r[2]) retain];
-            indent_ = 28;
-        } else {
-            base_ = nil;
-            section_ = [section localized];
-            if (section_ != nil)
-                section_ = [section_ retain];
-            indent_ = 8;
-        }
-
-        name_  = section_ == nil || [section_ length] == 0 ? UCLocalize("NO_SECTION") : (NSString *) section_;
-        count_ = [NSString stringWithFormat:@"%d", [section count]];
-
-        if (editing_)
-            [switch_ setOn:(isSectionVisible(basic_) ? 1 : 0) animated:NO];
-    }
+    [switch_ setOn:[section_ visible] animated:NO];
 
     [self setAccessoryType:editing ? UITableViewCellAccessoryNone : UITableViewCellAccessoryDisclosureIndicator];
     [self setSelectionStyle:editing ? UITableViewCellSelectionStyleNone : UITableViewCellSelectionStyleBlue];
@@ -5861,30 +5970,37 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 }
 
 - (NSString *) accessibilityLabel {
-    return name_;
+    return [section_ localized];
 }
 
 - (void) drawContentRect:(CGRect)rect {
     bool highlighted(highlighted_ && !editing_);
 
-    float left(indent_);
+    float indent = 8;
+    if ([section_ parent] != nil)
+        indent = 28;
+
+    float left(indent);
     float width(rect.size.width - left);
     if (editing_)
         width -= 149;
     else
         width -= 62;
 
-    [icon_ drawInRect:CGRectMake(indent_, 7, 32, 32)];
+    [icon_ drawInRect:CGRectMake(indent, 7, 32, 32)];
 	left += 40;
 
     UISetColor(highlighted ? White_ : Black_);
-    [name_ drawAtPoint:CGPointMake(left, 9) forWidth:width withFont:Font22Bold_ lineBreakMode:UILineBreakModeTailTruncation];
+    NSString *label = [section_ localized];
+    if (label == nil) label = UCLocalize("ALL_PACKAGES");
+    [label drawAtPoint:CGPointMake(left, 9) forWidth:width withFont:Font22Bold_ lineBreakMode:UILineBreakModeTailTruncation];
 
-    CGSize size = [count_ sizeWithFont:Font14_];
+    NSString *count = [[NSNumber numberWithInt:[section_ count]] stringValue];
+    CGSize size = [count sizeWithFont:Font14_];
 
     UISetColor(White_);
-    if (count_ != nil)
-        [count_ drawAtPoint:CGPointMake(indent_ + 5 + (29 - size.width) / 2, 16) withFont:Font12Bold_];
+    if ([section_ count] > 0)
+        [count drawAtPoint:CGPointMake(indent + 5 + (29 - size.width) / 2, 16) withFont:Font12Bold_];
 }
 
 @end
@@ -6337,7 +6453,7 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     if ([database_ era] != era_)
         return nil;
 
-    Section *section([sections_ objectAtIndex:[path section]]);
+    TableSection *section([sections_ objectAtIndex:[path section]]);
     NSInteger row([path row]);
     Package *package([packages_ objectAtIndex:([section row] + row)]);
     return [[package retain] autorelease];
@@ -6477,7 +6593,7 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     indices_ = [NSMutableDictionary dictionaryWithCapacity:32];
     sections_ = [NSMutableArray arrayWithCapacity:16];
 
-    Section *section = nil;
+    TableSection *section = nil;
 
 #if TryIndexedCollation
     if ([[self class] hasIndexedCollation]) {
@@ -6487,12 +6603,12 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
         NSArray *titles = [collation sectionIndexTitles];
         int secidx = -1;
 
-        _profile(PackageTable$reloadData$Section)
+        _profile(PackageTable$reloadData$TableSection)
             for (size_t offset(0), end([packages_ count]); offset != end; ++offset) {
                 Package *package;
                 int index;
 
-                _profile(PackageTable$reloadData$Section$Package)
+                _profile(PackageTable$reloadData$TableSection$Package)
                     package = [packages_ objectAtIndex:offset];
                     index = [collation sectionForObject:package collationStringSelector:@selector(name)];
                 _end
@@ -6500,11 +6616,11 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
                 while (secidx < index) {
                     secidx += 1;
 
-                    _profile(PackageTable$reloadData$Section$Allocate)
-                        section = [[[Section alloc] initWithName:[titles objectAtIndex:secidx] row:offset localize:NO] autorelease];
+                    _profile(PackageTable$reloadData$TableSection$Allocate)
+                        section = [[[TableSection alloc] initWithName:[titles objectAtIndex:secidx] row:offset] autorelease];
                     _end
 
-                    _profile(PackageTable$reloadData$Section$Add)
+                    _profile(PackageTable$reloadData$TableSection$Add)
                         [sections_ addObject:section];
                     _end
                 }
@@ -6519,29 +6635,29 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 
         bool sectioned([self showsSections]);
         if (!sectioned) {
-            section = [[[Section alloc] initWithName:nil localize:false] autorelease];
+            section = [[[TableSection alloc] initWithName:nil] autorelease];
             [sections_ addObject:section];
         }
 
-        _profile(PackageTable$reloadData$Section)
+        _profile(PackageTable$reloadData$TableSection)
             for (size_t offset(0), end([packages_ count]); offset != end; ++offset) {
                 Package *package;
                 unichar index;
 
-                _profile(PackageTable$reloadData$Section$Package)
+                _profile(PackageTable$reloadData$TableSection$Package)
                     package = [packages_ objectAtIndex:offset];
                     index = [package index];
                 _end
 
                 if (sectioned && (section == nil || [section index] != index)) {
-                    _profile(PackageTable$reloadData$Section$Allocate)
-                        section = [[[Section alloc] initWithIndex:index row:offset] autorelease];
+                    _profile(PackageTable$reloadData$TableSection$Allocate)
+                        section = [[[TableSection alloc] initWithIndex:index row:offset] autorelease];
                     _end
 
                     [index_ addObject:[section name]];
                     //[indices_ setObject:[NSNumber numberForInt:[sections_ count]] forKey:index];
 
-                    _profile(PackageTable$reloadData$Section$Add)
+                    _profile(PackageTable$reloadData$TableSection$Add)
                         [sections_ addObject:section];
                     _end
                 }
@@ -7372,45 +7488,49 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 @interface SectionController : FilteredPackageListController {
     _H<IndirectDelegate, 1> indirect_;
     _H<CydiaObject> cydia_;
-    _H<NSString> section_;
+    _H<Section> section_;
     std::vector< _H<CyteWebViewTableViewCell, 1> > promoted_;
 }
 
-- (id) initWithDatabase:(Database *)database section:(NSString *)section;
+- (id) initWithDatabase:(Database *)database section:(Section *)section;
 
 @end
 
 @implementation SectionController
 
 - (NSURL *) referrerURL {
-    NSString *name = section_;
-    if (name == nil)
-        name = @"all";
+    NSString *name = nil;
+
+    if (section_ == nil)
+        name = @"no_section";
+    else
+        name = [section_ name];
 
     return [NSURL URLWithString:[NSString stringWithFormat:@"%@/#!/sections/%@", UI_, [name stringByAddingPercentEscapesIncludingReserved]]];
 }
 
 - (NSURL *) navigationURL {
-    NSString *name = section_;
-    if (name == nil)
-        name = @"all";
+    NSString *name = nil;
+
+    if (section_ == nil)
+        name = @"no_section";
+    else
+        name = [section_ name];
 
     return [NSURL URLWithString:[NSString stringWithFormat:@"cydia://sections/%@", [name stringByAddingPercentEscapesIncludingReserved]]];
 }
 
-- (id) initWithDatabase:(Database *)database section:(NSString *)name {
+- (id) initWithDatabase:(Database *)database section:(Section *)section {
     NSString *title;
-    if (name == nil)
-        title = UCLocalize("ALL_PACKAGES");
-    else if (![name isEqual:@""])
-        title = [[NSBundle mainBundle] localizedStringForKey:Simplify(name) value:nil table:@"Sections"];
-    else
+    if (section == nil)
         title = UCLocalize("NO_SECTION");
+    else
+        title = [section localized];
 
-    if ((self = [super initWithDatabase:database title:title filter:@selector(isVisibleInSection:) with:name]) != nil) {
+    if ((self = [super initWithDatabase:database title:title filter:@selector(isVisibleInSection:) with:section]) != nil) {
         indirect_ = [[[IndirectDelegate alloc] initWithDelegate:self] autorelease];
         cydia_ = [[[CydiaObject alloc] initWithDelegate:indirect_] autorelease];
-        section_ = name;
+        section_ = section;
     } return self;
 }
 
@@ -7489,7 +7609,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
         for (unsigned i(0); i != promoted_.size(); ++i) {
             CyteWebViewTableViewCell *promoted([CyteWebViewTableViewCell cellWithRequest:[NSURLRequest
                 requestWithURL:[Diversion divertURL:[NSURL URLWithString:[NSString stringWithFormat:@"%@/#!/sectionhead/%u/%@",
-                    UI_, i, section_ == nil ? @"" : [section_ stringByAddingPercentEscapesIncludingReserved]]
+                    UI_, i, section_ == nil ? @"" : [[section_ name] stringByAddingPercentEscapesIncludingReserved]]
                 ]]
 
                 cachePolicy:NSURLRequestUseProtocolCachePolicy
@@ -7516,7 +7636,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 /* }}} */
 /* Sections Controller {{{ */
 @interface SectionsController : CyteViewController <
-    SectionsCellDelegate,
+    SectionCellDelegate,
     UITableViewDataSource,
     UITableViewDelegate
 > {
@@ -7527,6 +7647,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 }
 
 - (id) initWithDatabase:(Database *)database;
+- (void) updateVisibleSections;
 - (void) editButtonClicked;
 
 @end
@@ -7550,13 +7671,16 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
     }
 }
 
+- (void)sectionCellDidChangeVisibleState:(SectionCell *)cell {
+    [self updateVisibleSections];
+    [list_ reloadData];
+}
+
 - (void) setEditing:(BOOL)editing animated:(BOOL)animated {
     [super setEditing:editing animated:animated];
 
-    if (editing)
-        [list_ reloadData];
-    else
-        [delegate_ updateData];
+    [self updateVisibleSections];
+    [list_ reloadData];
 
     [self updateNavigationItem];
 }
@@ -7575,7 +7699,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
     Section *section = nil;
     int index = [indexPath row];
     if (![self isEditing]) {
-        index -= 1; 
+        index -= 1;
         if (index >= 0)
             section = [filtered_ objectAtIndex:index];
     } else {
@@ -7606,8 +7730,8 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
     if (cell == nil)
         cell = [[[SectionCell alloc] initWithFrame:CGRectZero reuseIdentifier:reuseIdentifier] autorelease];
 
-    [cell setSection:[self sectionAtIndexPath:indexPath] editing:[self isEditing]];
     [cell setDelegate:self];
+    [cell setSection:[self sectionAtIndexPath:indexPath] editing:[self isEditing]];
 
     return cell;
 }
@@ -7618,10 +7742,20 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 
     Section *section = [self sectionAtIndexPath:indexPath];
 
-    SectionController *controller = [[[SectionController alloc]
-        initWithDatabase:database_
-        section:[section name]
-    ] autorelease];
+    PackageListController *controller = nil;
+
+    if (section != nil) {
+        controller = [[[SectionController alloc]
+            initWithDatabase:database_
+            section:section
+        ] autorelease];
+    } else {
+        controller = [[[PackageListController alloc]
+            initWithDatabase:database_
+            title:UCLocalize("ALL_PACKAGES")
+        ] autorelease];
+    }
+
     [controller setDelegate:delegate_];
 
     [[self navigationController] pushViewController:controller animated:YES];
@@ -7657,57 +7791,31 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
     } return self;
 }
 
+- (void) updateVisibleSections {
+    [database_ updateSectionCounts];
+
+    filtered_ = [NSMutableArray arrayWithCapacity:32];
+
+    for (Section *section in (id) sections_) {
+        if (([section count] > 0 || [[section subsections] count] > 0) && [section visible])
+            [filtered_ addObject:section];
+    }
+}
+
 - (void) reloadData {
     [super reloadData];
 
-    NSArray *packages = [database_ packages];
+    NSArray *sections = [[database_ rootSections] sortedArrayUsingSelector:@selector(compareByLocalized:)];
+    sections_ = [NSMutableArray arrayWithCapacity:64];
 
-    sections_ = [NSMutableArray arrayWithCapacity:16];
-    filtered_ = [NSMutableArray arrayWithCapacity:16];
+    for (Section *section in sections) {
+        NSArray *subsections = [[section subsections] sortedArrayUsingSelector:@selector(compareByLocalized:)];
 
-    NSMutableDictionary *sections([NSMutableDictionary dictionaryWithCapacity:32]);
-
-    _trace();
-    for (Package *package in packages) {
-        NSString *name([package section]);
-        NSString *key(name == nil ? @"" : name);
-
-        Section *section;
-
-        _profile(SectionsView$reloadData$Section)
-            section = [sections objectForKey:key];
-            if (section == nil) {
-                _profile(SectionsView$reloadData$Section$Allocate)
-                    section = [[[Section alloc] initWithName:key localize:YES] autorelease];
-                    [sections setObject:section forKey:key];
-                _end
-            }
-        _end
-
-        [section addToCount];
-
-        _profile(SectionsView$reloadData$Filter)
-            if (![package valid] || ![package visible])
-                continue;
-        _end
-
-        [section addToRow];
+        [sections_ addObject:section];
+        [sections_ addObjectsFromArray:subsections];
     }
-    _trace();
 
-    [sections_ addObjectsFromArray:[sections allValues]];
-
-    [sections_ sortUsingSelector:@selector(compareByLocalized:)];
-
-    for (Section *section in (id) sections_) {
-        size_t count([section row]);
-        if (count == 0)
-            continue;
-
-        section = [[[Section alloc] initWithName:[section name] localized:[section localized]] autorelease];
-        [section setCount:count];
-        [filtered_ addObject:section];
-    }
+    [self updateVisibleSections];
 
     [self updateNavigationItem];
     [list_ reloadData];
@@ -7778,7 +7886,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
     NSUInteger sectionIndex([path section]);
     if (sectionIndex >= [sections_ count])
         return nil;
-    Section *section([sections_ objectAtIndex:sectionIndex]);
+    TableSection *section([sections_ objectAtIndex:sectionIndex]);
     NSInteger row([path row]);
     return [[[packages_ objectAtIndex:([section row] + row)] retain] autorelease];
 } }
@@ -7988,9 +8096,9 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
     packages_ = packages;
     sections_ = [NSMutableArray arrayWithCapacity:16];
 
-    Section *upgradable = [[[Section alloc] initWithName:UCLocalize("AVAILABLE_UPGRADES") localize:NO] autorelease];
-    Section *ignored = nil;
-    Section *section = nil;
+    TableSection *upgradable = [[[TableSection alloc] initWithName:UCLocalize("AVAILABLE_UPGRADES")] autorelease];
+    TableSection *ignored = nil;
+    TableSection *section = nil;
     time_t last = 0;
 
     upgrades_ = 0;
@@ -8016,7 +8124,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 
                 _profile(ChangesController$reloadData$Allocate)
                     name = [NSString stringWithFormat:UCLocalize("NEW_AT"), name];
-                    section = [[[Section alloc] initWithName:name row:offset localize:NO] autorelease];
+                    section = [[[TableSection alloc] initWithName:name row:offset] autorelease];
                     [sections_ addObject:section];
                 _end
             }
@@ -8024,7 +8132,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
             [section addToCount];
         } else if ([package ignored]) {
             if (ignored == nil) {
-                ignored = [[[Section alloc] initWithName:UCLocalize("IGNORED_UPGRADES") row:offset localize:NO] autorelease];
+                ignored = [[[TableSection alloc] initWithName:UCLocalize("IGNORED_UPGRADES") row:offset] autorelease];
             }
             [ignored addToCount];
         } else {
@@ -8037,7 +8145,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
     CFRelease(formatter);
 
     if (unseens) {
-        Section *last = [sections_ lastObject];
+        TableSection *last = [sections_ lastObject];
         size_t count = [last count];
         [packages_ removeObjectsInRange:NSMakeRange([packages_ count] - count, count)];
         [sections_ removeLastObject];
@@ -10023,7 +10131,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
         if (!external && [base isEqualToString:@"sections"]) {
             if ([argument isEqualToString:@"all"])
                 argument = nil;
-            controller = [[[SectionController alloc] initWithDatabase:database_ section:[argument stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding]] autorelease];
+            controller = [[[SectionController alloc] initWithDatabase:database_ section:[database_ sectionWithName:[argument stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding]]] autorelease];
         }
 
         if (!external && [base isEqualToString:@"sources"]) {
