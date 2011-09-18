@@ -6070,32 +6070,78 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 /* }}} */
 
 /* Package List Controller {{{ */
-@interface PackageListDataSource : NSObject <UITableViewDataSource> {
-    _transient Database *database_;
-    unsigned era_;
-    NSString *search_;
-    _H<NSArray> packages_;
-    _H<NSMutableArray> sections_;
-    _H<NSMutableArray> index_;
-    _H<NSMutableDictionary> indices_;
+
+// This is used to sort the filters. We want this to ensure that the
+// cheapest filters run first. This is probably a premature optimization.
+typedef enum {
+    kPackageListFilterPriorityLow,
+    kPackageListFilterPriorityNormal,
+    kPackageListFilterPriorityHigh
+} PackageListFilterPriority;
+
+typedef struct {
+    SEL selector;
+    id object;
+    PackageListFilterPriority priority;
+    IMP implementation;
+} PackageListFilter;
+
+@interface NSValue(PackageListFilter)
+
++ (id)valueWithPackageListFilter:(PackageListFilter)filter;
+- (PackageListFilter)packageListFilterValue;
+
+@end
+
+@implementation NSValue(PackageListFilter)
+
++ (id)valueWithPackageListFilter:(PackageListFilter)filter {
+    return [NSValue valueWithBytes:&filter objCType:@encode(PackageListFilter)];
+}
+
+- (PackageListFilter)packageListFilterValue {
+    PackageListFilter filter;
+    [self getValue:&filter];
+    return filter;
 }
 
 @end
 
-@implementation PackageListDataSource
+@interface FilteredPackageListDataSource : NSObject <UITableViewDataSource> {
+    _transient Database *database_;
+    unsigned era_;
+    _H<NSArray> packages_;
+    _H<NSMutableArray> sections_;
+    _H<NSMutableArray> index_;
+    _H<NSMutableDictionary> indices_;
+    _H<NSMutableDictionary> filters_;
+}
+
+- (id)objectForFilter:(NSString *)filter;
+- (void)setObject:(id)object forFilter:(NSString *)filter;
+- (SEL)selectorForFilter:(NSString *)filter;
+- (void)setSelector:(SEL)selector forFilter:(NSString *)filter;
+- (PackageListFilterPriority)priorityForFilter:(NSString *)filter;
+- (void)setPriority:(PackageListFilterPriority)priority forFilter:(NSString *)filter;
+
+- (void)addFilter:(NSString *)filter withSelector:(SEL)selector;
+- (void)addFilter:(NSString *)filter withSelector:(SEL)selector priority:(PackageListFilterPriority)priority;
+- (void)addFilter:(NSString *)filter withSelector:(SEL)selector priority:(PackageListFilterPriority)priority object:(id)object;
+- (void)removeFilter:(NSString *)filter;
+
+@end
+
+@implementation FilteredPackageListDataSource
 
 - (id) initWithDatabase:(Database *)database {
     if ((self = [super init]) != nil) {
         database_ = database;
+        filters_ = [NSMutableDictionary dictionary];
     } return self;
 }
 
 + (BOOL) supportsSearch {
     return YES;
-}
-
-- (void)setSearch:(NSString *)search {
-    search_ = [search copy];
 }
 
 - (Package *) packageAtIndexPath:(NSIndexPath *)path {
@@ -6156,45 +6202,145 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     return index;
 }
 
+- (IMP)implementationForSelector:(SEL)selector {
+@synchronized (self) {
+    /* XXX: this is an unsafe optimization of doomy hell */
+    Method method(class_getInstanceMethod([Package class], selector));
+    _assert(method != NULL);
+    IMP imp = method_getImplementation(method);
+    _assert(imp != NULL);
+
+    return imp;
+} }
+
+- (PackageListFilter)packageListFilterForFilter:(NSString *)filter {
+    return [[filters_ objectForKey:filter] packageListFilterValue];
+}
+
+- (void)setPackageListFilter:(PackageListFilter)filter forFilter:(NSString *)filterName {
+    [filters_ setObject:[NSValue valueWithPackageListFilter:filter] forKey:filterName];
+}
+
+- (id)objectForFilter:(NSString *)filter {
+    return [self packageListFilterForFilter:filter].object;
+}
+
+- (SEL)selectorForFilter:(NSString *)filter {
+    return [self packageListFilterForFilter:filter].selector;
+}
+
+- (IMP)implementationForFilter:(NSString *)filter {
+    return [self packageListFilterForFilter:filter].implementation;
+}
+
+- (PackageListFilterPriority)priorityForFilter:(NSString *)filter {
+    return [self packageListFilterForFilter:filter].priority;
+}
+
+- (void)setObject:(id)object forFilter:(NSString *)filterName {
+    PackageListFilter filter = [self packageListFilterForFilter:filterName];
+    filter.object = object;
+    [self setPackageListFilter:filter forFilter:filterName];
+}
+
+- (void)setPriority:(PackageListFilterPriority)priority forFilter:(NSString *)filterName {
+    PackageListFilter filter = [self packageListFilterForFilter:filterName];
+    filter.priority = priority;
+    [self setPackageListFilter:filter forFilter:filterName];
+}
+
+- (void)setImplementation:(IMP)implementation forFilter:(NSString *)filterName {
+    PackageListFilter filter = [self packageListFilterForFilter:filterName];
+    filter.implementation = implementation;
+    [self setPackageListFilter:filter forFilter:filterName];
+}
+
+- (void)setSelector:(SEL)selector forFilter:(NSString *)filterName {
+    PackageListFilter filter = [self packageListFilterForFilter:filterName];
+    filter.selector = selector;
+    [self setPackageListFilter:filter forFilter:filterName];
+
+    [self setImplementation:[self implementationForSelector:selector] forFilter:filterName];
+}
+
+- (void)addFilter:(NSString *)filterName {
+    PackageListFilter filter;
+    filter.object = nil;
+    filter.selector = NULL;
+    filter.implementation = NULL;
+    filter.priority = kPackageListFilterPriorityNormal;
+
+    [self setPackageListFilter:filter forFilter:filterName];
+}
+
+- (void)addFilter:(NSString *)filter withSelector:(SEL)selector {
+    [self addFilter:filter];
+    [self setSelector:selector forFilter:filter];
+}
+
+- (void)addFilter:(NSString *)filter withSelector:(SEL)selector priority:(PackageListFilterPriority)priority {
+    [self addFilter:filter withSelector:selector];
+    [self setPriority:priority forFilter:filter];
+}
+
+- (void)addFilter:(NSString *)filter withSelector:(SEL)selector priority:(PackageListFilterPriority)priority object:(id)object {
+    [self addFilter:filter withSelector:selector];
+    [self setObject:object forFilter:filter];
+}
+
+- (void)removeFilter:(NSString *)filter {
+    [filters_ removeObjectForKey:filter];
+}
+
 - (NSMutableArray *) _reloadPackages {
 @synchronized (database_) {
     era_ = [database_ era];
+
     NSArray *packages([database_ packages]);
+    NSMutableArray *filtered;
 
-    return [NSMutableArray arrayWithArray:packages];
-} }
+    NSArray *filters = [filters_ allKeys];
 
-- (NSArray *) searchPackages:(NSArray *)packages {
-    if (search_ == nil || [search_ length] == 0) return packages;
+    for (PackageListFilterPriority currentPriority = kPackageListFilterPriorityHigh; currentPriority >= kPackageListFilterPriorityLow; currentPriority = static_cast<PackageListFilterPriority>(static_cast<int>(currentPriority) - 1)) {
+        for (NSString *filterName in filters) {
+            PackageListFilter filter = [self packageListFilterForFilter:filterName];
 
-    IMP imp = NULL;
-    SEL filter = @selector(isUnfilteredAndSelectedForBy:);
+            if (filter.priority == currentPriority) {
+                filtered = [NSMutableArray arrayWithCapacity:[packages count]];
 
-    @synchronized (self) {
-        /* XXX: this is an unsafe optimization of doomy hell */
-        Method method(class_getInstanceMethod([Package class], filter));
-        _assert(method != NULL);
-        imp = method_getImplementation(method);
-        _assert(imp != NULL);
-    }
+                IMP implementation;
+                SEL selector;
+                _H<NSObject> object;
 
-    NSMutableArray *searched = [NSMutableArray arrayWithCapacity:([packages count] / 4)];
+                @synchronized (self) {
+                    implementation = filter.implementation;
+                    selector = filter.selector;
+                    object = filter.object;
+                }
 
-    for (Package *package in packages) {
-        if ((*reinterpret_cast<bool (*)(id, SEL, id)>(imp))(package, filter, search_)) {
-            [searched addObject:package];
+                if (implementation == NULL) continue;
+
+                _profile(PackageTable$reloadData$Filter)
+                    for (Package *package in packages)
+                        if ([package valid] && (*reinterpret_cast<bool (*)(id, SEL, id)>(implementation))(package, selector, object))
+                            [filtered addObject:package];
+                _end
+
+                packages = filtered;
+            }
         }
     }
 
-    return searched;
-}
+    // packages would also be valid here, but it's defined
+    // as an immutable array. filtered works too, so use it.
+    return filtered;
+} }
 
 - (void) reloadData {
     NSArray *packages;
 
   reload:
     packages = [self _reloadPackages];
-    packages = [self searchPackages:packages];
 
 @synchronized (database_) {
     if (era_ != [database_ era])
@@ -6238,12 +6384,11 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 
 @end
 
-@interface PackageListController : CyteViewController <UITableViewDelegate> {
+@interface FilteredPackageListController : CyteViewController <UITableViewDelegate, UISearchDisplayDelegate> {
     _transient Database *database_;
     _H<UISearchDisplayController> searchController_;
     _H<UISearchBar> searchBar_;
-    _H<PackageListDataSource> datasource_;
-    _H<PackageListDataSource> searchDatasource_;
+    _H<FilteredPackageListDataSource> datasource_;
     _H<UITableView, 2> list_;
     _H<NSString> title_;
 }
@@ -6253,7 +6398,7 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 
 @end
 
-@implementation PackageListController
+@implementation FilteredPackageListController
 
 - (NSURL *) referrerURL {
     return [self navigationURL];
@@ -6275,9 +6420,7 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 }
 
 - (void) tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)path {
-    PackageListDataSource *source = datasource_;
-    if ([searchController_ isActive])
-        source = searchDatasource_;
+    FilteredPackageListDataSource *source = datasource_;
 
     Package *package([source packageAtIndexPath:path]);
     package = [database_ packageWithName:[package id]];
@@ -6285,7 +6428,7 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
 }
 
 + (Class) dataSourceClass {
-    return [PackageListDataSource class];
+    return [FilteredPackageListDataSource class];
 }
 
 - (id) initWithDatabase:(Database *)database title:(NSString *)title {
@@ -6293,7 +6436,6 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
         database_ = database;
 
         datasource_ = [[[[[self class] dataSourceClass] alloc] initWithDatabase:database_] autorelease];
-        searchDatasource_ = [[[[[self class] dataSourceClass] alloc] initWithDatabase:database_] autorelease];
 
         title_ = [title copy];
         [[self navigationItem] setTitle:title_];
@@ -6323,15 +6465,20 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
         [searchController_ setDelegate:self];
         [list_ setTableHeaderView:searchBar_];
 
-        [searchController_ setSearchResultsDataSource:searchDatasource_];
+        [searchController_ setSearchResultsDataSource:datasource_];
         [searchController_ setSearchResultsDelegate:self];
     }
 }
 
 - (BOOL)searchDisplayController:(UISearchDisplayController *)controller shouldReloadTableForSearchString:(NSString *)searchString {
-    [searchDatasource_ setSearch:searchString];
-    [searchDatasource_ reloadData];
+    [datasource_ addFilter:@"search" withSelector:@selector(isUnfilteredAndSelectedForBy:) priority:kPackageListFilterPriorityLow object:searchString];
+    [datasource_ reloadData];
     return YES;
+}
+
+- (void)searchDisplayControllerWillEndSearch:(UISearchDisplayController *)controller {
+    [datasource_ removeFilter:@"search"];
+    [self reloadData];
 }
 
 - (void)searchDisplayController:(UISearchDisplayController *)controller willShowSearchResultsTableView:(UITableView *)tableView {
@@ -6362,111 +6509,6 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     [list_ reloadData];
 
     [self resetScrollPosition];
-}
-
-@end
-/* }}} */
-/* Filtered Package List Controller {{{ */
-
-@interface FilteredPackageListDataSource : PackageListDataSource {
-    SEL filter_;
-    IMP imp_;
-    _H<NSObject> object_;
-}
-
-@property (assign) SEL filter;
-@property (assign) id object;
-
-@end
-
-@implementation FilteredPackageListDataSource
-
-- (SEL) filter {
-    return filter_;
-}
-
-- (void) setFilter:(SEL)filter {
-@synchronized (self) {
-    filter_ = filter;
-
-    /* XXX: this is an unsafe optimization of doomy hell */
-    Method method(class_getInstanceMethod([Package class], filter));
-    _assert(method != NULL);
-    imp_ = method_getImplementation(method);
-    _assert(imp_ != NULL);
-} }
-
-- (id) object {
-    return object_;
-}
-
-- (void) setObject:(id)object {
-@synchronized (self) {
-    object_ = object;
-} }
-
-- (NSMutableArray *) _reloadPackages {
-@synchronized (database_) {
-    era_ = [database_ era];
-    NSArray *packages([database_ packages]);
-
-    NSMutableArray *filtered([NSMutableArray arrayWithCapacity:[packages count]]);
-
-    IMP imp;
-    SEL filter;
-    _H<NSObject> object;
-
-    @synchronized (self) {
-        imp = imp_;
-        filter = filter_;
-        object = object_;
-    }
-
-    if (imp == NULL) return filtered;
-
-    _profile(PackageTable$reloadData$Filter)
-        for (Package *package in packages)
-            if ([package valid] && (*reinterpret_cast<bool (*)(id, SEL, id)>(imp))(package, filter, object))
-                [filtered addObject:package];
-    _end
-
-    return filtered;
-} }
-
-@end
-
-@interface FilteredPackageListController : PackageListController {
-}
-
-@end
-
-@implementation FilteredPackageListController
-
-+ (Class) dataSourceClass {
-    return [FilteredPackageListDataSource class];
-}
-
-- (SEL) filter {
-    return [datasource_ filter];
-}
-
-- (void) setFilter:(SEL)filter {
-    [datasource_ setFilter:filter];
-    [searchDatasource_ setFilter:filter];
-}
-
-- (id) object {
-    return [datasource_ object];
-}
-
-- (void) setObject:(id)object {
-    [datasource_ setObject:object];
-    [searchDatasource_ setObject:object];
-}
-
-- (void)setFilter:(SEL)filter object:(id)object {
-    [self setFilter:filter];
-    [self setObject:object];
 }
 
 @end
@@ -7160,7 +7202,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
         title = UCLocalize("NO_SECTION");
 
     if ((self = [super initWithDatabase:database title:title]) != nil) {
-        [self setFilter:@selector(isVisibleInSection:) object:name];
+        [datasource_ addFilter:@"section" withSelector:@selector(isVisibleInSection:) priority:kPackageListFilterPriorityHigh object:name];
         indirect_ = [[[IndirectDelegate alloc] initWithDelegate:self] autorelease];
         cydia_ = [[[CydiaObject alloc] initWithDelegate:indirect_] autorelease];
         section_ = name;
@@ -7469,7 +7511,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 /* }}} */
 
 /* Changes Controller {{{ */
-@interface ChangesPackageListDataSource : PackageListDataSource {
+@interface ChangesPackageListDataSource : FilteredPackageListDataSource {
     unsigned upgrades_;
 }
 
@@ -7577,7 +7619,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 
 @end
 
-@interface ChangesPackageListController : PackageListController <
+@interface ChangesPackageListController : FilteredPackageListController <
     CyteWebViewDelegate
 > {
     _H<CyteWebView, 1> dickbar_;
@@ -7958,7 +8000,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 
 - (id) initWithDatabase:(Database *)database {
     if ((self = [super initWithDatabase:database title:UCLocalize("INSTALLED") ]) != nil) {
-        [self setFilter:@selector(isInstalledAndUnfiltered:) object:[NSNumber numberWithBool:YES]];
+        [datasource_ addFilter:@"installed" withSelector:@selector(isInstalledAndUnfiltered:) priority:kPackageListFilterPriorityHigh object:[NSNumber numberWithBool:YES]];
         [self updateRoleButton];
         [self queueStatusDidChange];
     } return self;
@@ -7996,7 +8038,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 }
 
 - (void) roleButtonClicked {
-    [self setObject:[NSNumber numberWithBool:expert_]];
+    [datasource_ setObject:[NSNumber numberWithBool:expert_] forFilter:@"installed"];
     [self reloadData];
     expert_ = !expert_;
 
@@ -8136,7 +8178,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 
 - (id) initWithDatabase:(Database *)database source:(Source *)source {
     if ((self = [super initWithDatabase:database title:[source label]]) != nil) {
-        [self setFilter:@selector(isVisibleInSource:) object:source];
+        [datasource_ addFilter:@"source" withSelector:@selector(isVisibleInSource:) priority:kPackageListFilterPriorityHigh object:source];
         source_ = source;
         key_ = [source key];
     } return self;
@@ -8145,7 +8187,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 - (void) reloadData {
     source_ = [database_ sourceWithKey:key_];
     key_ = [source_ key];
-    [self setObject:source_];
+    [datasource_ setObject:source_ forFilter:@"source"];
 
     [[self navigationItem] setTitle:[source_ label]];
 
