@@ -275,6 +275,7 @@ typedef enum {
 @end
 
 @interface UITabBarItem (Apple)
+@property(retain, nonatomic) UIView *view;
 - (void) setAnimatedBadge:(BOOL)animated;
 @end
 

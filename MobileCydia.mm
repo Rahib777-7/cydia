@@ -67,6 +67,8 @@
 #include <IOKit/IOKitLib.h>
 
 #include <QuartzCore/CALayer.h>
+#include <QuartzCore/CAAnimation.h>
+#include <QuartzCore/CAMediaTimingFunction.h>
 
 #include <WebCore/WebCoreThread.h>
 
@@ -686,8 +688,6 @@ static NSArray *Finishes_;
 
 #define SpringBoard_ "/System/Library/LaunchDaemons/com.apple.SpringBoard.plist"
 #define NotifyConfig_ "/etc/notify.conf"
-
-static bool Queuing_;
 
 static CYColor Blue_;
 static CYColor Blueish_;
@@ -4765,724 +4765,6 @@ static _H<NSMutableSet> Diversions_;
 @end
 // }}}
 
-/* Confirmation Controller {{{ */
-bool DepSubstrate(const pkgCache::VerIterator &iterator) {
-    if (!iterator.end())
-        for (pkgCache::DepIterator dep(iterator.DependsList()); !dep.end(); ++dep) {
-            if (dep->Type != pkgCache::Dep::Depends && dep->Type != pkgCache::Dep::PreDepends)
-                continue;
-            pkgCache::PkgIterator package(dep.TargetPkg());
-            if (package.end())
-                continue;
-            if (strcmp(package.Name(), "mobilesubstrate") == 0)
-                return true;
-        }
-
-    return false;
-}
-
-@protocol ConfirmationControllerDelegate
-- (void) cancelAndClear:(bool)clear;
-- (void) confirmWithNavigationController:(UINavigationController *)navigation;
-- (void) queue;
-@end
-
-@interface ConfirmationController : CydiaWebViewController {
-    _transient Database *database_;
-
-    _H<UIAlertView> essential_;
-
-    _H<NSDictionary> changes_;
-    _H<NSMutableArray> issues_;
-    _H<NSDictionary> sizes_;
-
-    BOOL substrate_;
-}
-
-- (id) initWithDatabase:(Database *)database;
-
-@end
-
-@implementation ConfirmationController
-
-- (void) complete {
-    if (substrate_)
-        RestartSubstrate_ = true;
-    [delegate_ confirmWithNavigationController:[self navigationController]];
-}
-
-- (void) alertView:(UIAlertView *)alert clickedButtonAtIndex:(NSInteger)button {
-    NSString *context([alert context]);
-
-    if ([context isEqualToString:@"remove"]) {
-        if (button == [alert cancelButtonIndex])
-            [self dismissModalViewControllerAnimated:YES];
-        else if (button == [alert firstOtherButtonIndex]) {
-            [self performSelector:@selector(complete) withObject:nil afterDelay:0];
-        }
-
-        [alert dismissWithClickedButtonIndex:-1 animated:YES];
-    } else if ([context isEqualToString:@"unable"]) {
-        [self dismissModalViewControllerAnimated:YES];
-        [alert dismissWithClickedButtonIndex:-1 animated:YES];
-    } else {
-        [super alertView:alert clickedButtonAtIndex:button];
-    }
-}
-
-- (void) _doContinue {
-    [delegate_ cancelAndClear:NO];
-    [self dismissModalViewControllerAnimated:YES];
-}
-
-- (id) invokeDefaultMethodWithArguments:(NSArray *)args {
-    [self performSelectorOnMainThread:@selector(_doContinue) withObject:nil waitUntilDone:NO];
-    return nil;
-}
-
-- (void) webView:(WebView *)view didClearWindowObject:(WebScriptObject *)window forFrame:(WebFrame *)frame {
-    [super webView:view didClearWindowObject:window forFrame:frame];
-
-    [window setValue:[[NSDictionary dictionaryWithObjectsAndKeys:
-        (id) changes_, @"changes",
-        (id) issues_, @"issues",
-        (id) sizes_, @"sizes",
-        self, @"queue",
-    nil] Cydia$webScriptObjectInContext:window] forKey:@"cydiaConfirm"];
-}
-
-- (id) initWithDatabase:(Database *)database {
-    if ((self = [super init]) != nil) {
-        database_ = database;
-
-        NSMutableArray *installs([NSMutableArray arrayWithCapacity:16]);
-        NSMutableArray *reinstalls([NSMutableArray arrayWithCapacity:16]);
-        NSMutableArray *upgrades([NSMutableArray arrayWithCapacity:16]);
-        NSMutableArray *downgrades([NSMutableArray arrayWithCapacity:16]);
-        NSMutableArray *removes([NSMutableArray arrayWithCapacity:16]);
-
-        bool remove(false);
-
-        pkgCacheFile &cache([database_ cache]);
-        NSArray *packages([database_ packages]);
-        pkgDepCache::Policy *policy([database_ policy]);
-
-        issues_ = [NSMutableArray arrayWithCapacity:4];
-
-        for (Package *package in packages) {
-            pkgCache::PkgIterator iterator([package iterator]);
-            NSString *name([package id]);
-
-            if ([package broken]) {
-                NSMutableArray *reasons([NSMutableArray arrayWithCapacity:4]);
-
-                [issues_ addObject:[NSDictionary dictionaryWithObjectsAndKeys:
-                    name, @"package",
-                    reasons, @"reasons",
-                nil]];
-
-                pkgCache::VerIterator ver(cache[iterator].InstVerIter(cache));
-                if (ver.end())
-                    continue;
-
-                for (pkgCache::DepIterator dep(ver.DependsList()); !dep.end(); ) {
-                    pkgCache::DepIterator start;
-                    pkgCache::DepIterator end;
-                    dep.GlobOr(start, end); // ++dep
-
-                    if (!cache->IsImportantDep(end))
-                        continue;
-                    if ((cache[end] & pkgDepCache::DepGInstall) != 0)
-                        continue;
-
-                    NSMutableArray *clauses([NSMutableArray arrayWithCapacity:4]);
-
-                    [reasons addObject:[NSDictionary dictionaryWithObjectsAndKeys:
-                        [NSString stringWithUTF8String:start.DepType()], @"relationship",
-                        clauses, @"clauses",
-                    nil]];
-
-                    _forever {
-                        NSString *reason, *installed((NSString *) [WebUndefined undefined]);
-
-                        pkgCache::PkgIterator target(start.TargetPkg());
-                        if (target->ProvidesList != 0)
-                            reason = @"missing";
-                        else {
-                            pkgCache::VerIterator ver(cache[target].InstVerIter(cache));
-                            if (!ver.end()) {
-                                reason = @"installed";
-                                installed = [NSString stringWithUTF8String:ver.VerStr()];
-                            } else if (!cache[target].CandidateVerIter(cache).end())
-                                reason = @"uninstalled";
-                            else if (target->ProvidesList == 0)
-                                reason = @"uninstallable";
-                            else
-                                reason = @"virtual";
-                        }
-
-                        NSDictionary *version(start.TargetVer() == 0 ? [NSNull null] : [NSDictionary dictionaryWithObjectsAndKeys:
-                            [NSString stringWithUTF8String:start.CompType()], @"operator",
-                            [NSString stringWithUTF8String:start.TargetVer()], @"value",
-                        nil]);
-
-                        [clauses addObject:[NSDictionary dictionaryWithObjectsAndKeys:
-                            [NSString stringWithUTF8String:start.TargetPkg().Name()], @"package",
-                            version, @"version",
-                            reason, @"reason",
-                            installed, @"installed",
-                        nil]];
-
-                        // yes, seriously. (wtf?)
-                        if (start == end)
-                            break;
-                        ++start;
-                    }
-                }
-            }
-
-            pkgDepCache::StateCache &state(cache[iterator]);
-
-            static Pcre special_r("^(firmware$|gsc\\.|cy\\+)");
-
-            if (state.NewInstall())
-                [installs addObject:name];
-            // XXX: else if (state.Install())
-            else if (!state.Delete() && (state.iFlags & pkgDepCache::ReInstall) == pkgDepCache::ReInstall)
-                [reinstalls addObject:name];
-            // XXX: move before previous if
-            else if (state.Upgrade())
-                [upgrades addObject:name];
-            else if (state.Downgrade())
-                [downgrades addObject:name];
-            else if (!state.Delete())
-                // XXX: _assert(state.Keep());
-                continue;
-            else if (special_r(name))
-                [issues_ addObject:[NSDictionary dictionaryWithObjectsAndKeys:
-                    [NSNull null], @"package",
-                    [NSArray arrayWithObjects:
-                        [NSDictionary dictionaryWithObjectsAndKeys:
-                            @"Conflicts", @"relationship",
-                            [NSArray arrayWithObjects:
-                                [NSDictionary dictionaryWithObjectsAndKeys:
-                                    name, @"package",
-                                    [NSNull null], @"version",
-                                    @"installed", @"reason",
-                                nil],
-                            nil], @"clauses",
-                        nil],
-                    nil], @"reasons",
-                nil]];
-            else {
-                if ([package essential])
-                    remove = true;
-                [removes addObject:name];
-            }
-
-            substrate_ |= DepSubstrate(policy->GetCandidateVer(iterator));
-            substrate_ |= DepSubstrate(iterator.CurrentVer());
-        }
-
-        if (!remove)
-            essential_ = nil;
-        else if (Advanced_) {
-            NSString *parenthetical(UCLocalize("PARENTHETICAL"));
-
-            essential_ = [[[UIAlertView alloc]
-                initWithTitle:UCLocalize("REMOVING_ESSENTIALS")
-                message:UCLocalize("REMOVING_ESSENTIALS_EX")
-                delegate:self
-                cancelButtonTitle:[NSString stringWithFormat:parenthetical, UCLocalize("CANCEL_OPERATION"), UCLocalize("SAFE")]
-                otherButtonTitles:
-                    [NSString stringWithFormat:parenthetical, UCLocalize("FORCE_REMOVAL"), UCLocalize("UNSAFE")],
-                nil
-            ] autorelease];
-
-            [essential_ setContext:@"remove"];
-            [essential_ setNumberOfRows:2];
-        } else {
-            essential_ = [[[UIAlertView alloc]
-                initWithTitle:UCLocalize("UNABLE_TO_COMPLY")
-                message:UCLocalize("UNABLE_TO_COMPLY_EX")
-                delegate:self
-                cancelButtonTitle:UCLocalize("OKAY")
-                otherButtonTitles:nil
-            ] autorelease];
-
-            [essential_ setContext:@"unable"];
-        }
-
-        changes_ = [NSDictionary dictionaryWithObjectsAndKeys:
-            installs, @"installs",
-            reinstalls, @"reinstalls",
-            upgrades, @"upgrades",
-            downgrades, @"downgrades",
-            removes, @"removes",
-        nil];
-
-        sizes_ = [NSDictionary dictionaryWithObjectsAndKeys:
-            [NSNumber numberWithInteger:[database_ fetcher].FetchNeeded()], @"downloading",
-            [NSNumber numberWithInteger:[database_ fetcher].PartialPresent()], @"resuming",
-        nil];
-
-        [self setURL:[NSURL URLWithString:[NSString stringWithFormat:@"%@/#!/confirm/", UI_]]];
-    } return self;
-}
-
-- (UIBarButtonItem *) leftButton {
-    return [[[UIBarButtonItem alloc]
-        initWithTitle:UCLocalize("CANCEL")
-        style:UIBarButtonItemStylePlain
-        target:self
-        action:@selector(cancelButtonClicked)
-    ] autorelease];
-}
-
-#if !AlwaysReload
-- (void) applyRightButton {
-    if ([issues_ count] == 0 && ![self isLoading])
-        [[self navigationItem] setRightBarButtonItem:[[[UIBarButtonItem alloc]
-            initWithTitle:UCLocalize("CONFIRM")
-            style:UIBarButtonItemStyleDone
-            target:self
-            action:@selector(confirmButtonClicked)
-        ] autorelease]];
-    else
-        [[self navigationItem] setRightBarButtonItem:nil];
-}
-#endif
-
-- (void) cancelButtonClicked {
-    [delegate_ cancelAndClear:YES];
-    [self dismissModalViewControllerAnimated:YES];
-}
-
-#if !AlwaysReload
-- (void) confirmButtonClicked {
-    if (essential_ != nil)
-        [essential_ show];
-    else
-        [self complete];
-}
-#endif
-
-@end
-/* }}} */
-
-/* Progress Data {{{ */
-@interface CydiaProgressData : NSObject {
-    _transient id delegate_;
-
-    bool running_;
-    float percent_;
-
-    float current_;
-    float total_;
-    float speed_;
-
-    _H<NSMutableArray> events_;
-    _H<NSString> title_;
-
-    _H<NSString> status_;
-    _H<NSString> finish_;
-}
-
-@end
-
-@implementation CydiaProgressData
-
-+ (NSArray *) _attributeKeys {
-    return [NSArray arrayWithObjects:
-        @"current",
-        @"events",
-        @"finish",
-        @"percent",
-        @"running",
-        @"speed",
-        @"title",
-        @"total",
-    nil];
-}
-
-- (NSArray *) attributeKeys {
-    return [[self class] _attributeKeys];
-}
-
-+ (BOOL) isKeyExcludedFromWebScript:(const char *)name {
-    return ![[self _attributeKeys] containsObject:[NSString stringWithUTF8String:name]] && [super isKeyExcludedFromWebScript:name];
-}
-
-- (id) init {
-    if ((self = [super init]) != nil) {
-        events_ = [NSMutableArray arrayWithCapacity:32];
-    } return self;
-}
-
-- (void) setDelegate:(id)delegate {
-    delegate_ = delegate;
-}
-
-- (void) setPercent:(float)value {
-    percent_ = value;
-}
-
-- (NSNumber *) percent {
-    return [NSNumber numberWithFloat:percent_];
-}
-
-- (void) setCurrent:(float)value {
-    current_ = value;
-}
-
-- (NSNumber *) current {
-    return [NSNumber numberWithFloat:current_];
-}
-
-- (void) setTotal:(float)value {
-    total_ = value;
-}
-
-- (NSNumber *) total {
-    return [NSNumber numberWithFloat:total_];
-}
-
-- (void) setSpeed:(float)value {
-    speed_ = value;
-}
-
-- (NSNumber *) speed {
-    return [NSNumber numberWithFloat:speed_];
-}
-
-- (NSArray *) events {
-    return events_;
-}
-
-- (void) removeAllEvents {
-    [events_ removeAllObjects];
-}
-
-- (void) addEvent:(CydiaProgressEvent *)event {
-    [events_ addObject:event];
-}
-
-- (void) setTitle:(NSString *)text {
-    title_ = text;
-}
-
-- (NSString *) title {
-    return title_;
-}
-
-- (void) setFinish:(NSString *)text {
-    finish_ = text;
-}
-
-- (NSString *) finish {
-    return (id) finish_ ?: [NSNull null];
-}
-
-- (void) setRunning:(bool)running {
-    running_ = running;
-}
-
-- (NSNumber *) running {
-    return running_ ? (NSNumber *) kCFBooleanTrue : (NSNumber *) kCFBooleanFalse;
-}
-
-@end
-/* }}} */
-/* Progress Controller {{{ */
-@interface ProgressController : CydiaWebViewController <
-    ProgressDelegate
-> {
-    _transient Database *database_;
-    _H<CydiaProgressData, 1> progress_;
-    unsigned cancel_;
-}
-
-- (id) initWithDatabase:(Database *)database delegate:(id)delegate;
-
-- (void) invoke:(NSInvocation *)invocation withTitle:(NSString *)title;
-
-- (void) setTitle:(NSString *)title;
-- (void) setCancellable:(bool)cancellable;
-
-@end
-
-@implementation ProgressController
-
-- (void) dealloc {
-    [database_ setProgressDelegate:nil];
-    [super dealloc];
-}
-
-- (UIBarButtonItem *) leftButton {
-    return cancel_ == 1 ? [[[UIBarButtonItem alloc]
-        initWithTitle:UCLocalize("CANCEL")
-        style:UIBarButtonItemStylePlain
-        target:self
-        action:@selector(cancel)
-    ] autorelease] : nil;
-}
-
-- (void) updateCancel {
-    [super applyLeftButton];
-}
-
-- (id) initWithDatabase:(Database *)database delegate:(id)delegate {
-    if ((self = [super init]) != nil) {
-        database_ = database;
-        delegate_ = delegate;
-
-        [database_ setProgressDelegate:self];
-
-        progress_ = [[[CydiaProgressData alloc] init] autorelease];
-        [progress_ setDelegate:self];
-
-        [self setURL:[NSURL URLWithString:[NSString stringWithFormat:@"%@/#!/progress/", UI_]]];
-
-        [scroller_ setBackgroundColor:[UIColor blackColor]];
-
-        [[self navigationItem] setHidesBackButton:YES];
-
-        [self updateCancel];
-    } return self;
-}
-
-- (void) webView:(WebView *)view didClearWindowObject:(WebScriptObject *)window forFrame:(WebFrame *)frame {
-    [super webView:view didClearWindowObject:window forFrame:frame];
-    [window setValue:progress_ forKey:@"cydiaProgress"];
-}
-
-- (void) updateProgress {
-    [self dispatchEvent:@"CydiaProgressUpdate"];
-}
-
-- (void) viewWillAppear:(BOOL)animated {
-    [[[self navigationController] navigationBar] setBarStyle:UIBarStyleBlack];
-    [super viewWillAppear:animated];
-}
-
-- (void) reloadSpringBoard {
-    pid_t pid(ExecFork());
-    if (pid == 0) {
-        pid_t pid(ExecFork());
-        if (pid == 0) {
-            execl("/usr/bin/sbreload", "sbreload", NULL);
-            perror("sbreload");
-            exit(0);
-        }
-
-        exit(0);
-    }
-
-    ReapZombie(pid);
-
-    sleep(15);
-    system("/usr/bin/killall SpringBoard");
-}
-
-- (void) close {
-    UpdateExternalStatus(0);
-
-    if (Finish_ > 1)
-        [delegate_ saveState];
-
-    switch (Finish_) {
-        case 0:
-            [delegate_ returnToCydia];
-        break;
-
-        case 1:
-            [delegate_ terminateWithSuccess];
-            /*if ([delegate_ respondsToSelector:@selector(suspendWithAnimation:)])
-                [delegate_ suspendWithAnimation:YES];
-            else
-                [delegate_ suspend];*/
-        break;
-
-        case 2:
-            _trace();
-            goto reload;
-
-        case 3:
-            _trace();
-            goto reload;
-
-        reload: {
-            UIProgressHUD *hud([delegate_ addProgressHUD]);
-            [hud setText:UCLocalize("LOADING")];
-            [self performSelector:@selector(reloadSpringBoard) withObject:nil afterDelay:0.5];
-            return;
-        }
-
-        case 4:
-            _trace();
-            if (void (*SBReboot)(mach_port_t) = reinterpret_cast<void (*)(mach_port_t)>(dlsym(RTLD_DEFAULT, "SBReboot")))
-                SBReboot(SBSSpringBoardServerPort());
-            else
-                reboot2(RB_AUTOBOOT);
-        break;
-    }
-
-    [super close];
-}
-
-- (void) setTitle:(NSString *)title {
-    [progress_ setTitle:title];
-    [self updateProgress];
-}
-
-- (UIBarButtonItem *) rightButton {
-    return [[progress_ running] boolValue] ? [super rightButton] : [[[UIBarButtonItem alloc]
-        initWithTitle:UCLocalize("CLOSE")
-        style:UIBarButtonItemStylePlain
-        target:self
-        action:@selector(close)
-    ] autorelease];
-}
-
-- (void) invoke:(NSInvocation *)invocation withTitle:(NSString *)title {
-    UpdateExternalStatus(1);
-
-    [progress_ setRunning:true];
-    [self setTitle:title];
-    // implicit updateProgress
-
-    SHA1SumValue notifyconf; {
-        FileFd file;
-        if (!file.Open(NotifyConfig_, FileFd::ReadOnly))
-            _error->Discard();
-        else {
-            MMap mmap(file, MMap::ReadOnly);
-            SHA1Summation sha1;
-            sha1.Add(reinterpret_cast<uint8_t *>(mmap.Data()), mmap.Size());
-            notifyconf = sha1.Result();
-        }
-    }
-
-    SHA1SumValue springlist; {
-        FileFd file;
-        if (!file.Open(SpringBoard_, FileFd::ReadOnly))
-            _error->Discard();
-        else {
-            MMap mmap(file, MMap::ReadOnly);
-            SHA1Summation sha1;
-            sha1.Add(reinterpret_cast<uint8_t *>(mmap.Data()), mmap.Size());
-            springlist = sha1.Result();
-        }
-    }
-
-    if (invocation != nil) {
-        [invocation yieldToSelector:@selector(invoke)];
-        [self setTitle:@"COMPLETE"];
-    }
-
-    if (Finish_ < 4) {
-        FileFd file;
-        if (!file.Open(NotifyConfig_, FileFd::ReadOnly))
-            _error->Discard();
-        else {
-            MMap mmap(file, MMap::ReadOnly);
-            SHA1Summation sha1;
-            sha1.Add(reinterpret_cast<uint8_t *>(mmap.Data()), mmap.Size());
-            if (!(notifyconf == sha1.Result()))
-                Finish_ = 4;
-        }
-    }
-
-    if (Finish_ < 3) {
-        FileFd file;
-        if (!file.Open(SpringBoard_, FileFd::ReadOnly))
-            _error->Discard();
-        else {
-            MMap mmap(file, MMap::ReadOnly);
-            SHA1Summation sha1;
-            sha1.Add(reinterpret_cast<uint8_t *>(mmap.Data()), mmap.Size());
-            if (!(springlist == sha1.Result()))
-                Finish_ = 3;
-        }
-    }
-
-    if (Finish_ < 2) {
-        if (RestartSubstrate_)
-            Finish_ = 2;
-    }
-
-    RestartSubstrate_ = false;
-
-    switch (Finish_) {
-        case 0: [progress_ setFinish:UCLocalize("RETURN_TO_CYDIA")]; break; /* XXX: Maybe UCLocalize("DONE")? */
-        case 1: [progress_ setFinish:UCLocalize("CLOSE_CYDIA")]; break;
-        case 2: [progress_ setFinish:UCLocalize("RESTART_SPRINGBOARD")]; break;
-        case 3: [progress_ setFinish:UCLocalize("RELOAD_SPRINGBOARD")]; break;
-        case 4: [progress_ setFinish:UCLocalize("REBOOT_DEVICE")]; break;
-    }
-
-    UpdateExternalStatus(Finish_ == 0 ? 0 : 2);
-
-    [progress_ setRunning:false];
-    [self updateProgress];
-
-    [self applyRightButton];
-}
-
-- (void) addProgressEvent:(CydiaProgressEvent *)event {
-    [progress_ addEvent:event];
-    [self updateProgress];
-}
-
-- (bool) isProgressCancelled {
-    return cancel_ == 2;
-}
-
-- (void) cancel {
-    cancel_ = 2;
-    [self updateCancel];
-}
-
-- (void) setCancellable:(bool)cancellable {
-    unsigned cancel(cancel_);
-
-    if (!cancellable)
-        cancel_ = 0;
-    else if (cancel_ == 0)
-        cancel_ = 1;
-
-    if (cancel != cancel_)
-        [self updateCancel];
-}
-
-- (void) setProgressCancellable:(NSNumber *)cancellable {
-    [self setCancellable:[cancellable boolValue]];
-}
-
-- (void) setProgressPercent:(NSNumber *)percent {
-    [progress_ setPercent:[percent floatValue]];
-    [self updateProgress];
-}
-
-- (void) setProgressStatus:(NSDictionary *)status {
-    if (status == nil) {
-        [progress_ setCurrent:0];
-        [progress_ setTotal:0];
-        [progress_ setSpeed:0];
-    } else {
-        [progress_ setPercent:[[status objectForKey:@"Percent"] floatValue]];
-
-        [progress_ setCurrent:[[status objectForKey:@"Current"] floatValue]];
-        [progress_ setTotal:[[status objectForKey:@"Total"] floatValue]];
-        [progress_ setSpeed:[[status objectForKey:@"Speed"] floatValue]];
-    }
-
-    [self updateProgress];
-}
-
-@end
-/* }}} */
-
 /* Package Cell {{{ */
 @interface PackageCell : CyteTableViewCell <
     CyteTableViewCellDelegate
@@ -5938,6 +5220,64 @@ bool DepSubstrate(const pkgCache::VerIterator &iterator) {
     else if ([name isEqualToString:UCLocalize("UPGRADE")])
         [delegate_ installPackage:package_];
     else _assert(false);
+
+    UITabBar *tabBar = [[self tabBarController] tabBar];
+    UITabBarItem *lastItem = [[tabBar items] lastObject];
+    CGPoint endPoint = [[[lastItem view] superview] convertPoint:[[lastItem view] frame].origin toView:nil];
+    endPoint = CGPointMake(endPoint.x + [[lastItem view] frame].size.width / 2, endPoint.y + [[lastItem view] frame].size.height / 2);
+
+    UIBarButtonItem *rightItem = [[self navigationItem] rightBarButtonItem];
+    CGPoint startPoint = [[[rightItem view] superview] convertPoint:[[rightItem view] frame].origin toView:nil];
+    startPoint = CGPointMake(startPoint.x + [[rightItem view] frame].size.width / 2, startPoint.y + [[rightItem view] frame].size.height / 2);
+
+    NSLog(@"animating from %@ to %@", NSStringFromCGPoint(startPoint), NSStringFromCGPoint(endPoint));
+
+    // Determine the animation's path.
+	CGPoint curvePoint1 = CGPointMake(startPoint.x - 130, startPoint.y - 10);
+	CGPoint curvePoint2 = CGPointMake(startPoint.x - 140, endPoint.y - 40);
+
+	// Create the animation's path.
+	CGPathRef path = NULL;
+	CGMutablePathRef mutablepath = CGPathCreateMutable();
+	CGPathMoveToPoint(mutablepath, NULL, startPoint.x, startPoint.y);
+
+	CGPathAddCurveToPoint(mutablepath, NULL,
+		curvePoint1.x, curvePoint1.y,
+		curvePoint2.x, curvePoint2.y,
+		endPoint.x,    endPoint.y);
+
+	path = CGPathCreateCopy(mutablepath);
+	CGPathRelease(mutablepath);
+
+	UIImageView* animatedLabel = [[UIImageView alloc] initWithImage:[UIImage imageNamed:@"packages.png"]];
+	animatedLabel.tag = 12345;
+	[[[self view] window] addSubview:animatedLabel];
+	[animatedLabel release];
+	CALayer *iconViewLayer = animatedLabel.layer;
+
+	CAKeyframeAnimation *animatedIconAnimation = [CAKeyframeAnimation animationWithKeyPath:@"position"];
+	animatedIconAnimation.removedOnCompletion = YES;
+	animatedIconAnimation.duration = 0.5;
+	animatedIconAnimation.delegate = self;
+	animatedIconAnimation.path = path;
+	animatedIconAnimation.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+	[iconViewLayer addAnimation:animatedIconAnimation forKey:@"animateIcon"];
+
+	// Start the icon animation.
+	[iconViewLayer setPosition:CGPointMake(endPoint.x, endPoint.y)];
+
+	[UIView beginAnimations:nil context:iconViewLayer];
+    [UIView setAnimationDelegate:self];
+    [UIView setAnimationDidStopSelector:@selector(flyAnimationCompleted:finished:context:)];
+	[UIView setAnimationCurve:UIViewAnimationCurveEaseIn];
+	[UIView setAnimationDuration:0.5];
+	[animatedLabel setTransform:CGAffineTransformMakeScale(0.3, 0.3)];
+	[UIView commitAnimations];
+}
+
+- (void) flyAnimationCompleted:(NSString *)animation finished:(BOOL)finished context:(void *)context {
+    CALayer *layer = (CALayer *) context;
+    [layer removeFromSuperlayer];
 }
 
 - (void) actionSheet:(UIActionSheet *)sheet clickedButtonAtIndex:(NSInteger)button {
@@ -6129,9 +5469,15 @@ typedef struct {
 - (void)addFilter:(NSString *)filter withSelector:(SEL)selector priority:(PackageListFilterPriority)priority object:(id)object;
 - (void)removeFilter:(NSString *)filter;
 
+- (NSArray *)packages;
+
 @end
 
 @implementation FilteredPackageListDataSource
+
+- (NSArray *) packages {
+    return packages_;
+}
 
 - (id) initWithDatabase:(Database *)database {
     if ((self = [super init]) != nil) {
@@ -8048,7 +7394,6 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 - (id) initWithDatabase:(Database *)database;
 
 - (void) updateRoleButton;
-- (void) queueStatusDidChange;
 
 @end
 
@@ -8066,29 +7411,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
     if ((self = [super initWithDatabase:database title:UCLocalize("INSTALLED") ]) != nil) {
         [datasource_ addFilter:@"installed" withSelector:@selector(isInstalledAndUnfiltered:) priority:kPackageListFilterPriorityHigh object:[NSNumber numberWithBool:YES]];
         [self updateRoleButton];
-        [self queueStatusDidChange];
     } return self;
-}
-
-#if !AlwaysReload
-- (void) queueButtonClicked {
-    [delegate_ queue];
-}
-#endif
-
-- (void) queueStatusDidChange {
-#if !AlwaysReload
-    if (Queuing_) {
-        [[self navigationItem] setLeftBarButtonItem:[[[UIBarButtonItem alloc]
-            initWithTitle:UCLocalize("QUEUE")
-            style:UIBarButtonItemStyleDone
-            target:self
-            action:@selector(queueButtonClicked)
-        ] autorelease]];
-    } else {
-        [[self navigationItem] setLeftBarButtonItem:nil];
-    }
-#endif
 }
 
 - (void) updateRoleButton {
@@ -8107,6 +7430,768 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
     expert_ = !expert_;
 
     [self updateRoleButton];
+}
+
+@end
+/* }}} */
+
+/* Confirmation Controller {{{ */
+bool DepSubstrate(const pkgCache::VerIterator &iterator) {
+    if (!iterator.end())
+        for (pkgCache::DepIterator dep(iterator.DependsList()); !dep.end(); ++dep) {
+            if (dep->Type != pkgCache::Dep::Depends && dep->Type != pkgCache::Dep::PreDepends)
+                continue;
+            pkgCache::PkgIterator package(dep.TargetPkg());
+            if (package.end())
+                continue;
+            if (strcmp(package.Name(), "mobilesubstrate") == 0)
+                return true;
+        }
+
+    return false;
+}
+
+@protocol ConfirmationControllerDelegate
+- (void) clearQueue;
+- (void) confirmWithNavigationController:(UINavigationController *)navigation;
+@end
+
+@interface ConfirmationControllerDataSource : FilteredPackageListDataSource {
+    _H<NSMutableArray> issues_;
+    BOOL removeEssential_;
+    BOOL substrate_;
+}
+
+@property (nonatomic, readonly) NSMutableArray *issues;
+@property (nonatomic, readonly, assign, getter=willRemoveEssential) BOOL removeEssential;
+@property (nonatomic, readonly, assign) BOOL substrate;
+
+@end
+
+@implementation ConfirmationControllerDataSource
+
+- (int) numberOfSectionsInTableView:(UITableView *)table {
+int n = [super numberOfSectionsInTableView:table];
+    NSLog(@"nubmer of sectoins: %d");
+    return n;
+}
+
+- (NSMutableArray *)issues {
+    return issues_;
+}
+
+- (BOOL)willRemoveEssential {
+    return removeEssential_;
+}
+
+- (BOOL)substrate {
+    return substrate_;
+}
+
++ (BOOL)supportsSearch {
+    return NO;
+}
+
+- (void)reloadData {
+    bool remove(false);
+
+    era_ = [database_ era];
+
+    pkgCacheFile &cache([database_ cache]);
+    NSArray *packages([database_ packages]);
+    pkgDepCache::Policy *policy([database_ policy]);
+
+    issues_ = [NSMutableArray arrayWithCapacity:4];
+
+    Section *installsSection = [[[Section alloc] initWithName:@"Install" localized:UCLocalize("INSTALLS")] autorelease];
+    Section *reinstallsSection = [[[Section alloc] initWithName:@"Reinstall" localized:UCLocalize("REINSTALLS")] autorelease];
+    Section *upgradesSection = [[[Section alloc] initWithName:@"Upgrade" localized:UCLocalize("UPGRADES")] autorelease];
+    Section *downgradesSection = [[[Section alloc] initWithName:@"Downgrade" localized:UCLocalize("DOWNGRADES")] autorelease];
+    Section *removesSection = [[[Section alloc] initWithName:@"Remove" localized:UCLocalize("REMOVES")] autorelease];
+
+    NSMutableArray *installs = [NSMutableArray arrayWithCapacity:16];
+    NSMutableArray *reinstalls = [NSMutableArray arrayWithCapacity:16];
+    NSMutableArray *upgrades = [NSMutableArray arrayWithCapacity:16];
+    NSMutableArray *downgrades = [NSMutableArray arrayWithCapacity:16];
+    NSMutableArray *removes = [NSMutableArray arrayWithCapacity:16];
+
+    for (Package *package in packages) {
+        pkgCache::PkgIterator iterator([package iterator]);
+        NSString *name([package id]);
+
+        if ([package broken]) {
+            NSMutableArray *reasons([NSMutableArray arrayWithCapacity:4]);
+
+            [issues_ addObject:[NSDictionary dictionaryWithObjectsAndKeys:
+                name, @"package",
+                reasons, @"reasons",
+            nil]];
+
+            pkgCache::VerIterator ver(cache[iterator].InstVerIter(cache));
+            if (ver.end())
+                continue;
+
+            for (pkgCache::DepIterator dep(ver.DependsList()); !dep.end(); ) {
+                pkgCache::DepIterator start;
+                pkgCache::DepIterator end;
+                dep.GlobOr(start, end); // ++dep
+
+                if (!cache->IsImportantDep(end))
+                    continue;
+                if ((cache[end] & pkgDepCache::DepGInstall) != 0)
+                    continue;
+
+                NSMutableArray *clauses([NSMutableArray arrayWithCapacity:4]);
+
+                [reasons addObject:[NSDictionary dictionaryWithObjectsAndKeys:
+                    [NSString stringWithUTF8String:start.DepType()], @"relationship",
+                    clauses, @"clauses",
+                nil]];
+
+                _forever {
+                    NSString *reason, *installed((NSString *) [WebUndefined undefined]);
+
+                    pkgCache::PkgIterator target(start.TargetPkg());
+                    if (target->ProvidesList != 0)
+                        reason = @"missing";
+                    else {
+                        pkgCache::VerIterator ver(cache[target].InstVerIter(cache));
+                        if (!ver.end()) {
+                            reason = @"installed";
+                            installed = [NSString stringWithUTF8String:ver.VerStr()];
+                        } else if (!cache[target].CandidateVerIter(cache).end())
+                            reason = @"uninstalled";
+                        else if (target->ProvidesList == 0)
+                            reason = @"uninstallable";
+                        else
+                            reason = @"virtual";
+                    }
+
+                    NSDictionary *version(start.TargetVer() == 0 ? [NSNull null] : [NSDictionary dictionaryWithObjectsAndKeys:
+                        [NSString stringWithUTF8String:start.CompType()], @"operator",
+                        [NSString stringWithUTF8String:start.TargetVer()], @"value",
+                    nil]);
+                    [clauses addObject:[NSDictionary dictionaryWithObjectsAndKeys:
+                        [NSString stringWithUTF8String:start.TargetPkg().Name()], @"package",
+                        version, @"version",
+                        reason, @"reason",
+                        installed, @"installed",
+                    nil]];
+
+                    // yes, seriously. (wtf?)
+                    if (start == end)
+                        break;
+                    ++start;
+                }
+            }
+        }
+
+        pkgDepCache::StateCache &state(cache[iterator]);
+
+        static Pcre special_r("^(firmware$|gsc\\.|cy\\+)");
+
+        if (state.NewInstall()) {
+            [installs addObject:package];
+            [installsSection addToCount];
+        // XXX: } else if (state.Install()) {
+        } else if (!state.Delete() && (state.iFlags & pkgDepCache::ReInstall) == pkgDepCache::ReInstall) {
+            [reinstalls addObject:package];
+            [reinstallsSection addToCount];
+        // XXX: move before previous if
+        } else if (state.Upgrade()) {
+            [upgrades addObject:package];
+            [upgradesSection addToCount];
+        } else if (state.Downgrade()) {
+            [downgrades addObject:package];
+            [downgradesSection addToCount];
+        } else if (!state.Delete()) {
+            // XXX: _assert(state.Keep());
+            continue;
+        } else if (special_r(name)) {
+            [issues_ addObject:[NSDictionary dictionaryWithObjectsAndKeys:
+                [NSNull null], @"package",
+                [NSArray arrayWithObjects:
+                    [NSDictionary dictionaryWithObjectsAndKeys:
+                        @"Conflicts", @"relationship",
+                        [NSArray arrayWithObjects:
+                            [NSDictionary dictionaryWithObjectsAndKeys:
+                                name, @"package",
+                                [NSNull null], @"version",
+                                @"installed", @"reason",
+                            nil],
+                        nil], @"clauses",
+                    nil],
+                nil], @"reasons",
+            nil]];
+        } else {
+            if ([package essential])
+                remove = true;
+            [removes addObject:package];
+            [removesSection addToCount];
+        }
+
+        substrate_ |= DepSubstrate(policy->GetCandidateVer(iterator));
+        substrate_ |= DepSubstrate(iterator.CurrentVer());
+    }
+
+    /*sizes_ = [NSDictionary dictionaryWithObjectsAndKeys:
+        [NSNumber numberWithInteger:[database_ fetcher].FetchNeeded()], @"downloading",
+        [NSNumber numberWithInteger:[database_ fetcher].PartialPresent()], @"resuming",
+    nil];*/
+
+    NSMutableArray *packagesList = [NSMutableArray arrayWithCapacity:64];
+    size_t count = 0;
+    count += [installs count];
+    [packagesList addObjectsFromArray:installs];
+    for (size_t i = 0; i < count; i++) [reinstallsSection addToRow];
+    count += [reinstalls count];
+    [packagesList addObjectsFromArray:reinstalls];
+    for (size_t i = 0; i < count; i++) [upgradesSection addToRow];
+    count += [upgrades count];
+    [packagesList addObjectsFromArray:upgrades];
+    for (size_t i = 0; i < count; i++) [downgradesSection addToRow];
+    count += [downgrades count];
+    [packagesList addObjectsFromArray:downgrades];
+    for (size_t i = 0; i < count; i++) [removesSection addToRow];
+    [packagesList addObjectsFromArray:removes];
+    packages_ = packagesList;
+
+    sections_ = [NSMutableArray arrayWithCapacity:4];
+    if ([installsSection count] > 0) [sections_ addObject:installsSection];
+    if ([reinstallsSection count] > 0) [sections_ addObject:reinstallsSection];
+    if ([upgradesSection count] > 0) [sections_ addObject:upgradesSection];
+    if ([downgradesSection count] > 0) [sections_ addObject:downgradesSection];
+    if ([removesSection count] > 0) [sections_ addObject:removesSection];
+}
+
+@end
+
+@interface ConfirmationController : FilteredPackageListController {
+    _H<UIAlertView> essential_;
+}
+
+- (id) initWithDatabase:(Database *)database;
+
+@end
+
+@implementation ConfirmationController
+
++ (Class) dataSourceClass {
+    return [ConfirmationControllerDataSource class];
+}
+
+- (void) complete {
+    if ([datasource_ substrate])
+        RestartSubstrate_ = true;
+    [delegate_ confirmWithNavigationController:[self navigationController]];
+}
+
+- (void) alertView:(UIAlertView *)alert clickedButtonAtIndex:(NSInteger)button {
+    NSString *context([alert context]);
+
+    if ([context isEqualToString:@"remove"]) {
+        if (button == [alert cancelButtonIndex])
+            [self dismissModalViewControllerAnimated:YES];
+        else if (button == [alert firstOtherButtonIndex]) {
+            [self performSelector:@selector(complete) withObject:nil afterDelay:0];
+        }
+
+        [alert dismissWithClickedButtonIndex:-1 animated:YES];
+    } else if ([context isEqualToString:@"unable"]) {
+        [self dismissModalViewControllerAnimated:YES];
+        [alert dismissWithClickedButtonIndex:-1 animated:YES];
+    }
+}
+
+- (id) initWithDatabase:(Database *)database {
+    if ((self = [super initWithDatabase:database title:UCLocalize("QUEUE")]) != nil) {
+    } return self;
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+
+    [self reloadData];
+}
+
+- (void)reloadData {
+    [super reloadData];
+
+    if (![datasource_ willRemoveEssential]) {
+        essential_ = nil;
+    } else if (Advanced_) {
+        NSString *parenthetical(UCLocalize("PARENTHETICAL"));
+
+        essential_ = [[[UIAlertView alloc]
+            initWithTitle:UCLocalize("REMOVING_ESSENTIALS")
+            message:UCLocalize("REMOVING_ESSENTIALS_EX")
+            delegate:self
+            cancelButtonTitle:[NSString stringWithFormat:parenthetical, UCLocalize("CANCEL_OPERATION"), UCLocalize("SAFE")]
+            otherButtonTitles:
+                [NSString stringWithFormat:parenthetical, UCLocalize("FORCE_REMOVAL"), UCLocalize("UNSAFE")],
+            nil
+        ] autorelease];
+
+        [essential_ setContext:@"remove"];
+        [essential_ setNumberOfRows:2];
+    } else {
+        essential_ = [[[UIAlertView alloc]
+            initWithTitle:UCLocalize("UNABLE_TO_COMPLY")
+            message:UCLocalize("UNABLE_TO_COMPLY_EX")
+            delegate:self
+            cancelButtonTitle:UCLocalize("OKAY")
+            otherButtonTitles:nil
+        ] autorelease];
+
+        [essential_ setContext:@"unable"];
+    }
+
+    if ([[datasource_ packages] count] > 0) {
+        [[self navigationItem] setLeftBarButtonItem:[[[UIBarButtonItem alloc]
+            initWithTitle:UCLocalize("CLEAR")
+            style:UIBarButtonItemStylePlain
+            target:self
+            action:@selector(clearButtonClicked)
+        ] autorelease]];
+    } else {
+        [[self navigationItem] setLeftBarButtonItem:nil];
+    }
+
+    if ([[datasource_ issues] count] == 0) {
+        [[self navigationItem] setRightBarButtonItem:[[[UIBarButtonItem alloc]
+            initWithTitle:UCLocalize("CONFIRM")
+            style:UIBarButtonItemStyleDone
+            target:self
+            action:@selector(confirmButtonClicked)
+        ] autorelease]];
+    } else {
+        [[self navigationItem] setRightBarButtonItem:nil];
+    }
+}
+
+- (void) clearButtonClicked {
+    [delegate_ clearQueue];
+    [self reloadData];
+}
+
+- (void) confirmButtonClicked {
+    if (essential_ != nil)
+        [essential_ show];
+    else
+        [self complete];
+}
+
+@end
+/* }}} */
+
+/* Progress Data {{{ */
+@interface CydiaProgressData : NSObject {
+    _transient id delegate_;
+
+    bool running_;
+    float percent_;
+
+    float current_;
+    float total_;
+    float speed_;
+
+    _H<NSMutableArray> events_;
+    _H<NSString> title_;
+
+    _H<NSString> status_;
+    _H<NSString> finish_;
+}
+
+@end
+
+@implementation CydiaProgressData
+
++ (NSArray *) _attributeKeys {
+    return [NSArray arrayWithObjects:
+        @"current",
+        @"events",
+        @"finish",
+        @"percent",
+        @"running",
+        @"speed",
+        @"title",
+        @"total",
+    nil];
+}
+
+- (NSArray *) attributeKeys {
+    return [[self class] _attributeKeys];
+}
+
++ (BOOL) isKeyExcludedFromWebScript:(const char *)name {
+    return ![[self _attributeKeys] containsObject:[NSString stringWithUTF8String:name]] && [super isKeyExcludedFromWebScript:name];
+}
+
+- (id) init {
+    if ((self = [super init]) != nil) {
+        events_ = [NSMutableArray arrayWithCapacity:32];
+    } return self;
+}
+
+- (void) setDelegate:(id)delegate {
+    delegate_ = delegate;
+}
+
+- (void) setPercent:(float)value {
+    percent_ = value;
+}
+
+- (NSNumber *) percent {
+    return [NSNumber numberWithFloat:percent_];
+}
+
+- (void) setCurrent:(float)value {
+    current_ = value;
+}
+
+- (NSNumber *) current {
+    return [NSNumber numberWithFloat:current_];
+}
+
+- (void) setTotal:(float)value {
+    total_ = value;
+}
+
+- (NSNumber *) total {
+    return [NSNumber numberWithFloat:total_];
+}
+
+- (void) setSpeed:(float)value {
+    speed_ = value;
+}
+
+- (NSNumber *) speed {
+    return [NSNumber numberWithFloat:speed_];
+}
+
+- (NSArray *) events {
+    return events_;
+}
+
+- (void) removeAllEvents {
+    [events_ removeAllObjects];
+}
+
+- (void) addEvent:(CydiaProgressEvent *)event {
+    [events_ addObject:event];
+}
+
+- (void) setTitle:(NSString *)text {
+    title_ = text;
+}
+
+- (NSString *) title {
+    return title_;
+}
+
+- (void) setFinish:(NSString *)text {
+    finish_ = text;
+}
+
+- (NSString *) finish {
+    return (id) finish_ ?: [NSNull null];
+}
+
+- (void) setRunning:(bool)running {
+    running_ = running;
+}
+
+- (NSNumber *) running {
+    return running_ ? (NSNumber *) kCFBooleanTrue : (NSNumber *) kCFBooleanFalse;
+}
+
+@end
+/* }}} */
+/* Progress Controller {{{ */
+@interface ProgressController : CydiaWebViewController <
+    ProgressDelegate
+> {
+    _transient Database *database_;
+    _H<CydiaProgressData, 1> progress_;
+    unsigned cancel_;
+}
+
+- (id) initWithDatabase:(Database *)database delegate:(id)delegate;
+
+- (void) invoke:(NSInvocation *)invocation withTitle:(NSString *)title;
+
+- (void) setTitle:(NSString *)title;
+- (void) setCancellable:(bool)cancellable;
+
+@end
+
+@implementation ProgressController
+
+- (void) dealloc {
+    [database_ setProgressDelegate:nil];
+    [super dealloc];
+}
+
+- (UIBarButtonItem *) leftButton {
+    return cancel_ == 1 ? [[[UIBarButtonItem alloc]
+        initWithTitle:UCLocalize("CANCEL")
+        style:UIBarButtonItemStylePlain
+        target:self
+        action:@selector(cancel)
+    ] autorelease] : nil;
+}
+
+- (void) updateCancel {
+    [super applyLeftButton];
+}
+
+- (id) initWithDatabase:(Database *)database delegate:(id)delegate {
+    if ((self = [super init]) != nil) {
+        database_ = database;
+        delegate_ = delegate;
+
+        [database_ setProgressDelegate:self];
+
+        progress_ = [[[CydiaProgressData alloc] init] autorelease];
+        [progress_ setDelegate:self];
+
+        [self setURL:[NSURL URLWithString:[NSString stringWithFormat:@"%@/#!/progress/", UI_]]];
+
+        [scroller_ setBackgroundColor:[UIColor blackColor]];
+
+        [[self navigationItem] setHidesBackButton:YES];
+
+        [self updateCancel];
+    } return self;
+}
+
+- (void) webView:(WebView *)view didClearWindowObject:(WebScriptObject *)window forFrame:(WebFrame *)frame {
+    [super webView:view didClearWindowObject:window forFrame:frame];
+    [window setValue:progress_ forKey:@"cydiaProgress"];
+}
+
+- (void) updateProgress {
+    [self dispatchEvent:@"CydiaProgressUpdate"];
+}
+
+- (void) viewWillAppear:(BOOL)animated {
+    [[[self navigationController] navigationBar] setBarStyle:UIBarStyleBlack];
+    [super viewWillAppear:animated];
+}
+
+- (void) reloadSpringBoard {
+    pid_t pid(ExecFork());
+    if (pid == 0) {
+        pid_t pid(ExecFork());
+        if (pid == 0) {
+            execl("/usr/bin/sbreload", "sbreload", NULL);
+            perror("sbreload");
+            exit(0);
+        }
+
+        exit(0);
+    }
+
+    ReapZombie(pid);
+
+    sleep(15);
+    system("/usr/bin/killall SpringBoard");
+}
+
+- (void) close {
+    UpdateExternalStatus(0);
+
+    if (Finish_ > 1)
+        [delegate_ saveState];
+
+    switch (Finish_) {
+        case 0:
+            [delegate_ returnToCydia];
+        break;
+
+        case 1:
+            [delegate_ terminateWithSuccess];
+            /*if ([delegate_ respondsToSelector:@selector(suspendWithAnimation:)])
+                [delegate_ suspendWithAnimation:YES];
+            else
+                [delegate_ suspend];*/
+        break;
+
+        case 2:
+            _trace();
+            goto reload;
+
+        case 3:
+            _trace();
+            goto reload;
+
+        reload: {
+            UIProgressHUD *hud([delegate_ addProgressHUD]);
+            [hud setText:UCLocalize("LOADING")];
+            [self performSelector:@selector(reloadSpringBoard) withObject:nil afterDelay:0.5];
+            return;
+        }
+
+        case 4:
+            _trace();
+            if (void (*SBReboot)(mach_port_t) = reinterpret_cast<void (*)(mach_port_t)>(dlsym(RTLD_DEFAULT, "SBReboot")))
+                SBReboot(SBSSpringBoardServerPort());
+            else
+                reboot2(RB_AUTOBOOT);
+        break;
+    }
+
+    [super close];
+}
+
+- (void) setTitle:(NSString *)title {
+    [progress_ setTitle:title];
+    [self updateProgress];
+}
+
+- (UIBarButtonItem *) rightButton {
+    return [[progress_ running] boolValue] ? [super rightButton] : [[[UIBarButtonItem alloc]
+        initWithTitle:UCLocalize("CLOSE")
+        style:UIBarButtonItemStylePlain
+        target:self
+        action:@selector(close)
+    ] autorelease];
+}
+
+- (void) invoke:(NSInvocation *)invocation withTitle:(NSString *)title {
+    UpdateExternalStatus(1);
+
+    [progress_ setRunning:true];
+    [self setTitle:title];
+    // implicit updateProgress
+
+    SHA1SumValue notifyconf; {
+        FileFd file;
+        if (!file.Open(NotifyConfig_, FileFd::ReadOnly))
+            _error->Discard();
+        else {
+            MMap mmap(file, MMap::ReadOnly);
+            SHA1Summation sha1;
+            sha1.Add(reinterpret_cast<uint8_t *>(mmap.Data()), mmap.Size());
+            notifyconf = sha1.Result();
+        }
+    }
+
+    SHA1SumValue springlist; {
+        FileFd file;
+        if (!file.Open(SpringBoard_, FileFd::ReadOnly))
+            _error->Discard();
+        else {
+            MMap mmap(file, MMap::ReadOnly);
+            SHA1Summation sha1;
+            sha1.Add(reinterpret_cast<uint8_t *>(mmap.Data()), mmap.Size());
+            springlist = sha1.Result();
+        }
+    }
+
+    if (invocation != nil) {
+        [invocation yieldToSelector:@selector(invoke)];
+        [self setTitle:@"COMPLETE"];
+    }
+
+    if (Finish_ < 4) {
+        FileFd file;
+        if (!file.Open(NotifyConfig_, FileFd::ReadOnly))
+            _error->Discard();
+        else {
+            MMap mmap(file, MMap::ReadOnly);
+            SHA1Summation sha1;
+            sha1.Add(reinterpret_cast<uint8_t *>(mmap.Data()), mmap.Size());
+            if (!(notifyconf == sha1.Result()))
+                Finish_ = 4;
+        }
+    }
+
+    if (Finish_ < 3) {
+        FileFd file;
+        if (!file.Open(SpringBoard_, FileFd::ReadOnly))
+            _error->Discard();
+        else {
+            MMap mmap(file, MMap::ReadOnly);
+            SHA1Summation sha1;
+            sha1.Add(reinterpret_cast<uint8_t *>(mmap.Data()), mmap.Size());
+            if (!(springlist == sha1.Result()))
+                Finish_ = 3;
+        }
+    }
+
+    if (Finish_ < 2) {
+        if (RestartSubstrate_)
+            Finish_ = 2;
+    }
+
+    RestartSubstrate_ = false;
+
+    switch (Finish_) {
+        case 0: [progress_ setFinish:UCLocalize("RETURN_TO_CYDIA")]; break; /* XXX: Maybe UCLocalize("DONE")? */
+        case 1: [progress_ setFinish:UCLocalize("CLOSE_CYDIA")]; break;
+        case 2: [progress_ setFinish:UCLocalize("RESTART_SPRINGBOARD")]; break;
+        case 3: [progress_ setFinish:UCLocalize("RELOAD_SPRINGBOARD")]; break;
+        case 4: [progress_ setFinish:UCLocalize("REBOOT_DEVICE")]; break;
+    }
+
+    UpdateExternalStatus(Finish_ == 0 ? 0 : 2);
+
+    [progress_ setRunning:false];
+    [self updateProgress];
+
+    [self applyRightButton];
+}
+
+- (void) addProgressEvent:(CydiaProgressEvent *)event {
+    [progress_ addEvent:event];
+    [self updateProgress];
+}
+
+- (bool) isProgressCancelled {
+    return cancel_ == 2;
+}
+
+- (void) cancel {
+    cancel_ = 2;
+    [self updateCancel];
+}
+
+- (void) setCancellable:(bool)cancellable {
+    unsigned cancel(cancel_);
+
+    if (!cancellable)
+        cancel_ = 0;
+    else if (cancel_ == 0)
+        cancel_ = 1;
+
+    if (cancel != cancel_)
+        [self updateCancel];
+}
+
+- (void) setProgressCancellable:(NSNumber *)cancellable {
+    [self setCancellable:[cancellable boolValue]];
+}
+
+- (void) setProgressPercent:(NSNumber *)percent {
+    [progress_ setPercent:[percent floatValue]];
+    [self updateProgress];
+}
+
+- (void) setProgressStatus:(NSDictionary *)status {
+    if (status == nil) {
+        [progress_ setCurrent:0];
+        [progress_ setTotal:0];
+        [progress_ setSpeed:0];
+    } else {
+        [progress_ setPercent:[[status objectForKey:@"Percent"] floatValue]];
+
+        [progress_ setCurrent:[[status objectForKey:@"Current"] floatValue]];
+        [progress_ setTotal:[[status objectForKey:@"Total"] floatValue]];
+        [progress_ setSpeed:[[status objectForKey:@"Speed"] floatValue]];
+    }
+
+    [self updateProgress];
 }
 
 @end
@@ -9084,12 +9169,6 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
     CydiaWriteSources();
 }
 
-// Navigation controller for the queuing badge.
-- (UINavigationController *) queueNavigationController {
-    NSArray *controllers = [tabbar_ viewControllers];
-    return [controllers objectAtIndex:3];
-}
-
 - (void) unloadData {
     [tabbar_ unloadData];
 }
@@ -9097,15 +9176,6 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 - (void) _updateData {
     [self _saveConfig];
     [self unloadData];
-
-    UINavigationController *navigation = [self queueNavigationController];
-
-    id queuedelegate = nil;
-    if ([[navigation viewControllers] count] > 0)
-        queuedelegate = [[navigation viewControllers] objectAtIndex:0];
-
-    [queuedelegate queueStatusDidChange];
-    [[navigation tabBarItem] setBadgeValue:(Queuing_ ? UCLocalize("Q_D") : nil)];
 }
 
 - (void) _refreshIfPossible:(NSDate *)update {
@@ -9290,39 +9360,10 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
         _error->Discard();
 }
 
-- (bool) perform {
-    // XXX: this is a really crappy way of doing this.
-    // like, seriously: this state machine is still broken, and cancelling this here doesn't really /fix/ that.
-    // for one, the user can still /start/ a reloading data event while they have a queue, which is stupid
-    // for two, this just means there is a race condition between the refresh completing and the confirmation controller appearing.
-    if ([tabbar_ updating])
-        [tabbar_ cancelUpdate];
-
-    if (![database_ prepare])
-        return false;
-
-    ConfirmationController *page([[[ConfirmationController alloc] initWithDatabase:database_] autorelease]);
-    [page setDelegate:self];
-    UINavigationController *confirm_([[[UINavigationController alloc] initWithRootViewController:page] autorelease]);
-
-    if (IsWildcat_)
-        [confirm_ setModalPresentationStyle:UIModalPresentationFormSheet];
-    [tabbar_ presentModalViewController:confirm_ animated:YES];
-
-    return true;
-}
-
-- (void) queue {
-    @synchronized (self) {
-        [self perform];
-    }
-}
-
 - (void) clearPackage:(Package *)package {
     @synchronized (self) {
         [package clear];
         [self resolve];
-        [self perform];
     }
 }
 
@@ -9331,7 +9372,6 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
         for (Package *package in packages)
             [package install];
         [self resolve];
-        [self perform];
     }
 }
 
@@ -9339,7 +9379,6 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
     @synchronized (self) {
         [package install];
         [self resolve];
-        [self perform];
     }
 }
 
@@ -9347,7 +9386,6 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
     @synchronized (self) {
         [package remove];
         [self resolve];
-        [self perform];
     }
 }
 
@@ -9355,7 +9393,6 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
     @synchronized (self) {
         if (![database_ upgrade])
             return;
-        [self perform];
     }
 }
 
@@ -9379,7 +9416,6 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 }
 
 - (void) confirmWithNavigationController:(UINavigationController *)navigation {
-    Queuing_ = false;
     ++locked_;
     [self detachNewProgressSelector:@selector(perform_) toTarget:self forController:navigation title:@"RUNNING"];
     --locked_;
@@ -9408,14 +9444,9 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 
 }
 
-- (void) cancelAndClear:(bool)clear {
+- (void) clearQueue {
     @synchronized (self) {
-        if (clear) {
-            [database_ clear];
-            Queuing_ = false;
-        } else {
-            Queuing_ = true;
-        }
+        [database_ clear];
 
         [self _updateData];
     }
@@ -9447,7 +9478,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
                 }
 
                 [self resolve];
-                [self perform];
+                // XXX: [self perform];
             }
         } else if (button == [alert firstOtherButtonIndex]) {
             [broken_ removeAllObjects];
@@ -9462,7 +9493,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
                     [essential install];
 
                 [self resolve];
-                [self perform];
+                // XXX: [self perform];
             }
         } else if (button == [alert firstOtherButtonIndex] + 1) {
             [self distUpgrade];
@@ -9610,6 +9641,10 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
 
         if ([base isEqualToString:@"installed"]) {
             controller = [[[InstalledController alloc] initWithDatabase:database_] autorelease];
+        }
+
+        if ([base isEqualToString:@"queue"]) {
+            controller = [[[ConfirmationController alloc] initWithDatabase:database_] autorelease];
         }
     } else if ([components count] == 2) {
         NSString *argument = [components objectAtIndex:1];
@@ -9771,6 +9806,7 @@ static void HomeControllerReachabilityCallback(SCNetworkReachabilityRef reachabi
         [[[UITabBarItem alloc] initWithTitle:UCLocalize("SOURCES") image:[UIImage applicationImageNamed:@"source.png"] tag:0] autorelease],
         [[[UITabBarItem alloc] initWithTitle:(AprilFools_ ? @"Timeline" : UCLocalize("CHANGES")) image:[UIImage applicationImageNamed:@"changes.png"] tag:0] autorelease],
         [[[UITabBarItem alloc] initWithTitle:UCLocalize("INSTALLED") image:[UIImage applicationImageNamed:@"manage.png"] tag:0] autorelease],
+        [[[UITabBarItem alloc] initWithTitle:UCLocalize("QUEUE") image:[UIImage applicationImageNamed:@"queue.png"] tag:0] autorelease],
     nil]);
 
     NSMutableArray *controllers([NSMutableArray array]);
@@ -9899,6 +9935,7 @@ _trace();
     [standard addObject:[NSArray arrayWithObject:@"cydia://sources"]];
     [standard addObject:[NSArray arrayWithObject:@"cydia://changes"]];
     [standard addObject:[NSArray arrayWithObject:@"cydia://installed"]];
+    [standard addObject:[NSArray arrayWithObject:@"cydia://queue"]];
     return standard;
 }
 
